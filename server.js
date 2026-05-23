@@ -42,6 +42,8 @@ const FOUNDRY_API_VERSION = process.env.FOUNDRY_API_VERSION || '2024-10-21';
 const DEMO_MODE = /^(1|true|yes|on)$/i.test(String(process.env.DEMO_MODE || '').trim());
 const GOOGLE_REVIEWS_CACHE_TTL_MS = 30 * 60 * 1000;
 const googleReviewsCache = new Map();
+const GEO_LOCATION_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const geoLocationCache = new Map();
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -234,6 +236,35 @@ async function proxyRidbFacilities(reqUrl, res) {
   }
 }
 
+async function proxyRidbCampsites(reqUrl, res, facilityId) {
+  if (!REC_API_KEY) {
+    sendJson(res, 503, { error: 'REC_API_KEY is missing on server.' });
+    return;
+  }
+
+  const limit = reqUrl.searchParams.get('limit') || '200';
+  const offset = reqUrl.searchParams.get('offset') || '0';
+
+  const upstream = new URL(`https://ridb.recreation.gov/api/v1/facilities/${encodeURIComponent(String(facilityId))}/campsites`);
+  upstream.searchParams.set('limit', limit);
+  upstream.searchParams.set('offset', offset);
+
+  try {
+    const response = await fetch(upstream, {
+      headers: {
+        apikey: REC_API_KEY,
+        Accept: 'application/json'
+      }
+    });
+
+    const text = await response.text();
+    res.writeHead(response.status, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(text);
+  } catch (error) {
+    sendJson(res, 502, { error: 'Failed to fetch RIDB campsites.', details: String(error) });
+  }
+}
+
 async function proxyNpsCampgrounds(reqUrl, res) {
   if (!NPS_API_KEY) {
     sendJson(res, 503, { error: 'NPS_API_KEY is missing on server.' });
@@ -359,6 +390,19 @@ async function proxyGoogleReviews(reqUrl, res) {
     }
 
     const placePayload = await placeResp.json();
+    const placeStatus = String(placePayload?.status || '').trim().toUpperCase();
+    const placeError = String(placePayload?.error_message || '').trim();
+
+    if (placeStatus && placeStatus !== 'OK' && placeStatus !== 'ZERO_RESULTS') {
+      sendJson(res, 200, {
+        enabled: false,
+        source: 'google',
+        reviews: [],
+        error: placeError || `Google Places findplace failed with status ${placeStatus}.`
+      });
+      return;
+    }
+
     const candidate = Array.isArray(placePayload?.candidates) ? placePayload.candidates[0] : null;
     const placeId = String(candidate?.place_id || '').trim();
 
@@ -399,6 +443,19 @@ async function proxyGoogleReviews(reqUrl, res) {
     }
 
     const detailsPayload = await detailsResp.json();
+    const detailsStatus = String(detailsPayload?.status || '').trim().toUpperCase();
+    const detailsError = String(detailsPayload?.error_message || '').trim();
+
+    if (detailsStatus && detailsStatus !== 'OK' && detailsStatus !== 'ZERO_RESULTS') {
+      sendJson(res, 200, {
+        enabled: false,
+        source: 'google',
+        reviews: [],
+        error: detailsError || `Google Places details failed with status ${detailsStatus}.`
+      });
+      return;
+    }
+
     const result = detailsPayload?.result || {};
 
     const reviews = (Array.isArray(result?.reviews) ? result.reviews : [])
@@ -438,6 +495,121 @@ async function proxyGoogleReviews(reqUrl, res) {
       source: 'fallback',
       reviews: [],
       error: `Failed to fetch Google reviews: ${String(error)}`
+    });
+  }
+}
+
+function extractCityStateFromGeocodeResult(result = {}) {
+  const components = Array.isArray(result.address_components) ? result.address_components : [];
+  const findByType = type => components.find(component => Array.isArray(component.types) && component.types.includes(type)) || null;
+
+  const cityComponent = findByType('locality')
+    || findByType('postal_town')
+    || findByType('administrative_area_level_3')
+    || findByType('sublocality')
+    || findByType('administrative_area_level_2');
+  const stateComponent = findByType('administrative_area_level_1');
+
+  const city = String(cityComponent?.long_name || '').trim();
+  const state = String(stateComponent?.short_name || stateComponent?.long_name || '').trim();
+
+  if (city && state) {
+    return `${city}, ${state}`;
+  }
+
+  if (city) {
+    return city;
+  }
+
+  if (state) {
+    return state;
+  }
+
+  const formatted = String(result.formatted_address || '').trim();
+  if (!formatted) {
+    return '';
+  }
+
+  const parts = formatted.split(',').map(part => part.trim()).filter(Boolean);
+  if (parts.length >= 2) {
+    return `${parts[0]}, ${parts[parts.length - 2] || parts[parts.length - 1]}`;
+  }
+
+  return formatted;
+}
+
+async function proxyReverseGeocode(reqUrl, res) {
+  if (!GOOGLE_PLACES_API_KEY) {
+    sendJson(res, 503, {
+      enabled: false,
+      error: 'GOOGLE_PLACES_API_KEY is missing on server.'
+    });
+    return;
+  }
+
+  const lat = Number(reqUrl.searchParams.get('lat'));
+  const lon = Number(reqUrl.searchParams.get('lon'));
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    sendJson(res, 400, { error: 'lat and lon are required.' });
+    return;
+  }
+
+  const cacheKey = `${lat.toFixed(5)},${lon.toFixed(5)}`;
+  const now = Date.now();
+  const cached = geoLocationCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    sendJson(res, 200, cached.payload);
+    return;
+  }
+
+  const geocodeUrl = new URL('https://maps.googleapis.com/maps/api/geocode/json');
+  geocodeUrl.searchParams.set('latlng', `${lat},${lon}`);
+  geocodeUrl.searchParams.set('key', GOOGLE_PLACES_API_KEY);
+
+  try {
+    const response = await fetch(geocodeUrl);
+    if (!response.ok) {
+      sendJson(res, response.status, {
+        enabled: false,
+        error: 'Failed to reverse geocode location.'
+      });
+      return;
+    }
+
+    const payload = await response.json();
+    const status = String(payload?.status || '').trim().toUpperCase();
+    const errorMessage = String(payload?.error_message || '').trim();
+    if (status && status !== 'OK' && status !== 'ZERO_RESULTS') {
+      sendJson(res, 200, {
+        enabled: false,
+        error: errorMessage || `Google geocoding failed with status ${status}.`
+      });
+      return;
+    }
+
+    const results = Array.isArray(payload?.results) ? payload.results : [];
+    const locationCandidates = results
+      .map(result => extractCityStateFromGeocodeResult(result))
+      .filter(Boolean);
+    const locationLabel = locationCandidates.find(label => /,/.test(label)) || locationCandidates[0] || '';
+    const result = results[0] || null;
+    const responsePayload = {
+      enabled: Boolean(locationLabel),
+      locationLabel,
+      formattedAddress: String(result?.formatted_address || '').trim(),
+      source: 'google'
+    };
+
+    geoLocationCache.set(cacheKey, {
+      expiresAt: now + GEO_LOCATION_CACHE_TTL_MS,
+      payload: responsePayload
+    });
+
+    sendJson(res, 200, responsePayload);
+  } catch (error) {
+    sendJson(res, 502, {
+      enabled: false,
+      error: `Failed to reverse geocode location: ${String(error)}`
     });
   }
 }
@@ -749,6 +921,12 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  const ridbCampsitesMatch = reqUrl.pathname.match(/^\/api\/ridb\/facilities\/(\d+)\/campsites$/);
+  if (ridbCampsitesMatch && req.method === 'GET') {
+    await proxyRidbCampsites(reqUrl, res, ridbCampsitesMatch[1]);
+    return;
+  }
+
   if (reqUrl.pathname === '/api/nps/campgrounds' && req.method === 'GET') {
     await proxyNpsCampgrounds(reqUrl, res);
     return;
@@ -767,6 +945,11 @@ const server = http.createServer(async (req, res) => {
 
   if (reqUrl.pathname === '/api/google/reviews' && req.method === 'GET') {
     await proxyGoogleReviews(reqUrl, res);
+    return;
+  }
+
+  if (reqUrl.pathname === '/api/location/reverse' && req.method === 'GET') {
+    await proxyReverseGeocode(reqUrl, res);
     return;
   }
 

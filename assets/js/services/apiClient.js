@@ -30,6 +30,13 @@ export function createApiClient(apiBaseUrl) {
       return requestJson(buildUrl(apiBaseUrl, '/ridb/facilities', { query, limit }));
     },
 
+    getRidbCampsites(facilityId, limit = 200, offset = 0) {
+      return requestJson(buildUrl(apiBaseUrl, `/ridb/facilities/${encodeURIComponent(String(facilityId))}/campsites`, {
+        limit,
+        offset
+      }));
+    },
+
     getNpsCampgrounds(query, limit = 12) {
       return requestJson(buildUrl(apiBaseUrl, '/nps/campgrounds', { q: query, limit }));
     },
@@ -54,6 +61,13 @@ export function createApiClient(apiBaseUrl) {
 
     getGoogleReviews(query) {
       return requestJson(buildUrl(apiBaseUrl, '/google/reviews', { query }));
+    },
+
+    reverseGeocode(lat, lon) {
+      return requestJson(buildUrl(apiBaseUrl, '/location/reverse', {
+        lat,
+        lon
+      }));
     }
   };
 }
