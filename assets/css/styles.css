@@ -992,11 +992,14 @@
     overflow: hidden; margin-bottom: 1rem;
   }
   .booking-date-row {
-    display: flex; border-bottom: 1px solid var(--border);
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    border-bottom: 1px solid var(--border);
   }
   .booking-date-row:last-child { border-bottom: none; }
   .date-field {
-    flex: 1; padding: 10px 12px;
+    min-width: 0;
+    padding: 10px 12px;
     border: none; background: transparent;
     cursor: pointer;
   }
@@ -1282,4 +1285,9 @@
     .detail-hero .detail-photo:first-child { grid-row: auto; height: 260px; }
     .detail-hero .detail-photo { height: 160px; }
     .booking-card, .checkout-summary { position: static; }
+    .booking-date-row { grid-template-columns: 1fr; }
+    .date-field + .date-field {
+      border-left: none;
+      border-top: 1px solid var(--border);
+    }
   }

@@ -1,0 +1,65 @@
+flowchart LR
+  U[User Browser]
+
+  subgraph FE[Frontend - Vanilla JS SPA]
+    H[index.html]
+    A[assets/js/app.js]
+    RV[assets/js/views/resultsView.js]
+    API[assets/js/services/apiClient.js]
+    BK[assets/js/domain/booking.js]
+    CSS[assets/css/styles.css]
+  end
+
+  subgraph BE[Backend - Node HTTP Server]
+    S[server.js]
+    ENV[.env loader]
+    CFG[API Config]
+    INT[API Intent Parse]
+    RIDB[API RIDB Facilities]
+    NPS[API NPS Campgrounds]
+    AV[API Recreation Availability]
+    JR[API Judge Results]
+    PH[API Photos Wikimedia]
+    GR[API Google Reviews]
+  end
+
+  subgraph EXT[External Services]
+    RG[Recreation.gov / RIDB]
+    NP[NPS API]
+    AZ[Azure Foundry LLM]
+    WM[Wikimedia Commons]
+    GP[Google Places API]
+  end
+
+  U --> H
+  H --> A
+  A --> RV
+  A --> API
+  A --> BK
+  H --> CSS
+
+  API --> CFG
+  API --> INT
+  API --> RIDB
+  API --> NPS
+  API --> AV
+  API --> JR
+  API --> PH
+  API --> GR
+
+  CFG --> S
+  INT --> S
+  RIDB --> S
+  NPS --> S
+  AV --> S
+  JR --> S
+  PH --> S
+  GR --> S
+
+  ENV --> S
+
+  S --> RG
+  S --> NP
+  S --> AZ
+  S --> WM
+  S --> GP
