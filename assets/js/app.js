@@ -740,6 +740,17 @@ let pendingAssistantMessageId = null;
     return value.replace(/"/g, '%22');
   }
 
+  function sanitizeBackgroundColor(value) {
+    const raw = String(value || '').trim();
+    if (!raw) {
+      return '#F5F3EE';
+    }
+
+    const isHex = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(raw);
+    const isRgb = /^rgba?\(\s*\d{1,3}(\s*,\s*\d{1,3}){2}(\s*,\s*(0|1|0?\.\d+))?\s*\)$/.test(raw);
+    return (isHex || isRgb) ? raw : '#F5F3EE';
+  }
+
   function pickRidbImageUrl(facility) {
     const media = Array.isArray(facility?.MEDIA) ? facility.MEDIA : [];
     const image = media.find(m => String(m?.MediaType || '').toLowerCase() === 'image') || media[0];
@@ -1120,22 +1131,36 @@ let pendingAssistantMessageId = null;
     }
 
     cards.forEach((c, idx) => {
+      const safeName = escapeHtml(c.name);
+      const safeType = escapeHtml(c.type);
+      const safeLocation = escapeHtml(c.loc);
+      const safeImageUrl = normalizeImageUrl(c.imageUrl);
+      const safeEmoji = escapeHtml(c.renderEmoji);
+      const safeBg = sanitizeBackgroundColor(c.renderBg);
+      const safeRegion = escapeHtml(String(c.region || '').toUpperCase());
+      const safeRating = Number.isFinite(Number(c.rating)) ? Number(c.rating) : 0;
+      const safeReviews = Number.isFinite(Number(c.reviews)) ? Math.round(Number(c.reviews)) : 0;
+      const safeTags = (Array.isArray(c.tags) ? c.tags : [])
+        .slice(0, 4)
+        .map(t => `<span class="camp-tag">${escapeHtml(t)}</span>`)
+        .join('');
+
       const card = document.createElement('div');
       card.className = 'camp-card';
       card.innerHTML = `
-        <div class="camp-img-placeholder" style="background:${c.renderBg}">
-          ${c.imageUrl ? `<img class="camp-img" src="${c.imageUrl}" alt="${c.name}" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none'; const f=this.parentElement.querySelector('.camp-fallback-emoji'); if (f) f.style.display='inline';">` : ''}
-          <span class="camp-fallback-emoji" style="font-size:3.5rem; ${c.imageUrl ? 'display:none;' : ''}">${c.renderEmoji}</span>
+        <div class="camp-img-placeholder" style="background:${safeBg}">
+          ${safeImageUrl ? `<img class="camp-img" src="${safeImageUrl}" alt="${safeName}" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none'; const f=this.parentElement.querySelector('.camp-fallback-emoji'); if (f) f.style.display='inline';">` : ''}
+          <span class="camp-fallback-emoji" style="font-size:3.5rem; ${safeImageUrl ? 'display:none;' : ''}">${safeEmoji}</span>
           <div class="camp-badge">Top #${idx + 1}</div>
         </div>
         <div class="camp-body">
-          <div class="camp-type">${c.type}</div>
-          <div class="camp-name">${c.name}</div>
-          <div class="camp-location">📍 ${c.loc}</div>
-          <div class="camp-tags">${(Array.isArray(c.tags) ? c.tags : []).slice(0, 4).map(t => `<span class="camp-tag">${t}</span>`).join('')}</div>
+          <div class="camp-type">${safeType}</div>
+          <div class="camp-name">${safeName}</div>
+          <div class="camp-location">📍 ${safeLocation}</div>
+          <div class="camp-tags">${safeTags}</div>
           <div class="camp-footer">
-            <div class="camp-price"><span class="price">${c.region.toUpperCase()}</span><span class="per"> region</span></div>
-            <div class="camp-rating"><span class="star">★</span><span class="score">${c.rating}</span><span class="count"> (${c.reviews})</span></div>
+            <div class="camp-price"><span class="price">${safeRegion}</span><span class="per"> region</span></div>
+            <div class="camp-rating"><span class="star">★</span><span class="score">${safeRating}</span><span class="count"> (${safeReviews})</span></div>
           </div>
         </div>`;
 
@@ -1883,12 +1908,22 @@ let pendingAssistantMessageId = null;
       const fallbackEmoji = camp.emoji || emojis[index % emojis.length];
       const fallbackBg = camp.bg || cardPalettes[index % cardPalettes.length];
 
-      slot.style.background = fallbackBg;
+      slot.style.background = sanitizeBackgroundColor(fallbackBg);
+      slot.innerHTML = '';
 
       if (photoUrl) {
-        slot.innerHTML = `<img class="detail-photo-img" src="${photoUrl}" alt="${camp.name}" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove(); this.parentElement.innerHTML='${fallbackEmoji}';">`;
+        const image = document.createElement('img');
+        image.className = 'detail-photo-img';
+        image.src = photoUrl;
+        image.alt = String(camp.name || 'Campground photo');
+        image.loading = 'lazy';
+        image.referrerPolicy = 'no-referrer';
+        image.addEventListener('error', () => {
+          slot.textContent = String(fallbackEmoji || '🏕️');
+        });
+        slot.appendChild(image);
       } else {
-        slot.textContent = fallbackEmoji;
+        slot.textContent = String(fallbackEmoji || '🏕️');
       }
     });
   }
