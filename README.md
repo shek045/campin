@@ -49,7 +49,7 @@ This project intentionally keeps npm dependencies minimal.
 
 ## Demo Screenshot
 
-![Campin demo screenshot](assets/demo-screenshot.png)
+![Campin demo screenshot](assets/demo-screenshot.svg)
 
 Home and results views with live API-powered recommendations, chat-based search, and intent-aware ranking.
 

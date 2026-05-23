@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="820" viewBox="0 0 1400 820" role="img" aria-label="Campin demo screenshot placeholder">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#f6f8f6"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#eef7f0"/>
+      <stop offset="100%" stop-color="#ffffff"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1400" height="820" fill="url(#bg)"/>
+
+  <rect x="38" y="30" width="1324" height="70" rx="16" fill="#ffffff" stroke="#dfe6e1"/>
+  <circle cx="86" cy="65" r="10" fill="#2f6b47"/>
+  <text x="108" y="71" font-family="Segoe UI, Arial, sans-serif" font-size="26" fill="#1f2a22" font-weight="700">campin</text>
+  <text x="1148" y="71" font-family="Segoe UI, Arial, sans-serif" font-size="18" fill="#4f5a52">Explore</text>
+  <text x="1240" y="71" font-family="Segoe UI, Arial, sans-serif" font-size="18" fill="#2f6b47" font-weight="700">Search</text>
+
+  <rect x="38" y="120" width="360" height="662" rx="24" fill="#ffffff" stroke="#dfe6e1"/>
+  <text x="68" y="172" font-family="Segoe UI, Arial, sans-serif" font-size="20" fill="#2f6b47" font-weight="700">Smart campsite finder</text>
+  <text x="68" y="206" font-family="Segoe UI, Arial, sans-serif" font-size="36" fill="#1f2a22" font-weight="700">Find your perfect</text>
+  <text x="68" y="247" font-family="Segoe UI, Arial, sans-serif" font-size="36" fill="#1f2a22" font-weight="700">campsite fast.</text>
+
+  <rect x="68" y="295" width="300" height="92" rx="16" fill="#f7f7f5" stroke="#e3e9e5"/>
+  <text x="88" y="333" font-family="Segoe UI, Arial, sans-serif" font-size="16" fill="#2f6b47" font-weight="700">12,400+</text>
+  <text x="88" y="358" font-family="Segoe UI, Arial, sans-serif" font-size="15" fill="#5b655f">Campsites indexed</text>
+
+  <rect x="68" y="410" width="300" height="92" rx="16" fill="#f7f7f5" stroke="#e3e9e5"/>
+  <text x="88" y="448" font-family="Segoe UI, Arial, sans-serif" font-size="16" fill="#2f6b47" font-weight="700">Live data</text>
+  <text x="88" y="473" font-family="Segoe UI, Arial, sans-serif" font-size="15" fill="#5b655f">Recreation.gov + NPS</text>
+
+  <rect x="418" y="120" width="944" height="662" rx="24" fill="url(#panel)" stroke="#dfe6e1"/>
+  <text x="458" y="176" font-family="Segoe UI, Arial, sans-serif" font-size="30" fill="#1f2a22" font-weight="700">Chat-style search</text>
+  <text x="458" y="206" font-family="Segoe UI, Arial, sans-serif" font-size="16" fill="#5b655f">Intent parsing, live availability, and ranked matches.</text>
+
+  <rect x="458" y="236" width="864" height="370" rx="18" fill="#ffffff" stroke="#e1e8e3"/>
+  <rect x="486" y="274" width="320" height="72" rx="14" fill="#f7f7f5"/>
+  <text x="510" y="317" font-family="Segoe UI, Arial, sans-serif" font-size="15" fill="#405047">Tell me what kind of trip you want...</text>
+
+  <rect x="1000" y="290" width="292" height="64" rx="14" fill="#eef7f0" stroke="#cfe2d7"/>
+  <text x="1024" y="329" font-family="Segoe UI, Arial, sans-serif" font-size="15" fill="#2f6b47">quiet lakeside near Seattle</text>
+
+  <rect x="486" y="372" width="806" height="94" rx="14" fill="#ffffff" stroke="#e8eeea"/>
+  <text x="510" y="408" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#2f6b47" font-weight="700">I found 8 live matches.</text>
+  <text x="510" y="435" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#4f5a52">Top results: Lakeshore Haven, Cascade Ridge, Heron Cove.</text>
+
+  <rect x="458" y="630" width="864" height="110" rx="18" fill="#ffffff" stroke="#e1e8e3"/>
+  <rect x="486" y="662" width="694" height="46" rx="23" fill="#ffffff" stroke="#d8e2db"/>
+  <text x="514" y="691" font-family="Segoe UI, Arial, sans-serif" font-size="15" fill="#5b655f">Describe your trip...</text>
+  <rect x="1200" y="662" width="92" height="46" rx="23" fill="#2f6b47"/>
+  <text x="1232" y="691" font-family="Segoe UI, Arial, sans-serif" font-size="15" fill="#ffffff" font-weight="700">Send</text>
+
+  <text x="700" y="790" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#76827a">Campin UI preview • Replace this file with a real screenshot anytime.</text>
+</svg>
