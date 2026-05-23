@@ -1,0 +1,9 @@
+{
+  "name": "campin-production",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Campin prototype with local API proxy for Recreation.gov and NPS.",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
