@@ -21,7 +21,11 @@ function loadDotEnv(filePath) {
 
     const key = trimmed.slice(0, sep).trim();
     const value = trimmed.slice(sep + 1).trim().replace(/^['\"]|['\"]$/g, '');
-    if (key && process.env[key] === undefined) {
+    if (!key) {
+      return;
+    }
+
+    if (process.env[key] === undefined) {
       process.env[key] = value;
     }
   });
@@ -42,8 +46,20 @@ const FOUNDRY_API_VERSION = process.env.FOUNDRY_API_VERSION || '2024-10-21';
 const DEMO_MODE = /^(1|true|yes|on)$/i.test(String(process.env.DEMO_MODE || '').trim());
 const GOOGLE_REVIEWS_CACHE_TTL_MS = 30 * 60 * 1000;
 const googleReviewsCache = new Map();
+const googleReviewsInFlight = new Map();
+const GOOGLE_REVIEWS_UPSTREAM_TIMEOUT_MS = 4500;
 const GEO_LOCATION_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const geoLocationCache = new Map();
+const GOOGLE_REVIEWS_CACHE_MAX_ENTRIES = 500;
+const GEO_LOCATION_CACHE_MAX_ENTRIES = 1000;
+
+const SECURITY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'strict-origin-when-cross-origin',
+  'Permissions-Policy': 'geolocation=(), microphone=(), camera=()',
+  'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' https: data:; connect-src 'self' https:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+};
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -61,10 +77,48 @@ const MIME_TYPES = {
 function sendJson(res, statusCode, payload) {
   const body = JSON.stringify(payload);
   res.writeHead(statusCode, {
+    ...SECURITY_HEADERS,
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(body)
   });
   res.end(body);
+}
+
+function pruneExpiringCache(cache, maxEntries) {
+  const now = Date.now();
+
+  for (const [key, value] of cache.entries()) {
+    if (!value || !Number.isFinite(Number(value.expiresAt)) || value.expiresAt <= now) {
+      cache.delete(key);
+    }
+  }
+
+  while (cache.size > maxEntries) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey === undefined) {
+      break;
+    }
+    cache.delete(oldestKey);
+  }
+}
+
+async function fetchJsonWithTimeout(url, timeoutMs = GOOGLE_REVIEWS_UPSTREAM_TIMEOUT_MS) {
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  let timeoutId = null;
+
+  if (controller && Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0) {
+    timeoutId = setTimeout(() => controller.abort(), Number(timeoutMs));
+  }
+
+  try {
+    const response = await fetch(url, controller ? { signal: controller.signal } : undefined);
+    const payload = await response.json().catch(() => ({}));
+    return { response, payload };
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
 }
 
 function makeFallbackIntent(queryText = '') {
@@ -153,6 +207,121 @@ function normalizeIntentResponse(parsed, originalQuery) {
   return normalized;
 }
 
+function parseJsonObject(rawContent) {
+  if (!rawContent || typeof rawContent !== 'string') {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(rawContent);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return null;
+    }
+    return parsed;
+  } catch (err) {
+    return null;
+  }
+}
+
+function validateIntentCandidate(candidate) {
+  const issues = [];
+
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+    return { valid: false, issues: ['Intent payload must be a JSON object.'] };
+  }
+
+  if (typeof candidate.queryRewrite !== 'string') {
+    issues.push('queryRewrite must be a string.');
+  }
+
+  if (typeof candidate.location !== 'string') {
+    issues.push('location must be a string.');
+  }
+
+  const partySize = candidate.partySize;
+  if (partySize !== null && !(Number.isInteger(Number(partySize)) && Number(partySize) > 0 && Number(partySize) <= 30)) {
+    issues.push('partySize must be null or an integer between 1 and 30.');
+  }
+
+  const constraints = candidate.constraints;
+  if (!constraints || typeof constraints !== 'object' || Array.isArray(constraints)) {
+    issues.push('constraints must be an object.');
+  } else {
+    ['dogFriendly', 'rv', 'tent', 'waterfront'].forEach(key => {
+      const value = constraints[key];
+      if (value !== null && typeof value !== 'boolean') {
+        issues.push(`constraints.${key} must be boolean or null.`);
+      }
+    });
+
+    const maxPrice = constraints.maxPrice;
+    if (maxPrice !== null && !(Number.isFinite(Number(maxPrice)) && Number(maxPrice) > 0)) {
+      issues.push('constraints.maxPrice must be a positive number or null.');
+    }
+  }
+
+  if (!Array.isArray(candidate.priorities)) {
+    issues.push('priorities must be an array.');
+  } else {
+    if (candidate.priorities.length > 6) {
+      issues.push('priorities cannot contain more than 6 items.');
+    }
+    if (candidate.priorities.some(item => typeof item !== 'string')) {
+      issues.push('priorities must contain only strings.');
+    }
+  }
+
+  if (!Array.isArray(candidate.clarificationQuestions)) {
+    issues.push('clarificationQuestions must be an array.');
+  } else {
+    if (candidate.clarificationQuestions.length > 3) {
+      issues.push('clarificationQuestions cannot contain more than 3 items.');
+    }
+    if (candidate.clarificationQuestions.some(item => typeof item !== 'string')) {
+      issues.push('clarificationQuestions must contain only strings.');
+    }
+  }
+
+  const confidence = candidate.confidence;
+  if (!(Number.isFinite(Number(confidence)) && Number(confidence) >= 0 && Number(confidence) <= 1)) {
+    issues.push('confidence must be a number between 0 and 1.');
+  }
+
+  return {
+    valid: issues.length === 0,
+    issues
+  };
+}
+
+async function callFoundryJsonObject(endpoint, requestBody, timeoutMs) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'api-key': FOUNDRY_API_KEY
+      },
+      body: JSON.stringify(requestBody),
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const payload = await response.json();
+    const rawContent = payload?.choices?.[0]?.message?.content;
+    return typeof rawContent === 'string' ? rawContent : null;
+  } catch (err) {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function readRequestBody(req) {
   return new Promise((resolve, reject) => {
     let data = '';
@@ -190,7 +359,10 @@ function sendFile(res, filePath) {
 
     const ext = path.extname(filePath).toLowerCase();
     const type = MIME_TYPES[ext] || 'application/octet-stream';
-    res.writeHead(200, { 'Content-Type': type });
+    res.writeHead(200, {
+      ...SECURITY_HEADERS,
+      'Content-Type': type
+    });
     res.end(data);
   });
 }
@@ -200,7 +372,8 @@ function safeResolvePath(urlPathname) {
   const normalized = path.normalize(decodedPath).replace(/^[/\\]+/, '');
   const resolved = path.resolve(ROOT, normalized);
 
-  if (!resolved.startsWith(ROOT)) {
+  const relative = path.relative(ROOT, resolved);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
     return null;
   }
 
@@ -363,11 +536,28 @@ async function proxyGoogleReviews(reqUrl, res) {
     return;
   }
 
+  pruneExpiringCache(googleReviewsCache, GOOGLE_REVIEWS_CACHE_MAX_ENTRIES);
   const cacheKey = query.toLowerCase();
   const now = Date.now();
   const cached = googleReviewsCache.get(cacheKey);
   if (cached && cached.expiresAt > now) {
     sendJson(res, 200, cached.payload);
+    return;
+  }
+
+  const inFlight = googleReviewsInFlight.get(cacheKey);
+  if (inFlight) {
+    try {
+      const payload = await inFlight;
+      sendJson(res, 200, payload);
+    } catch (error) {
+      sendJson(res, 200, {
+        enabled: false,
+        source: 'fallback',
+        reviews: [],
+        error: 'Google reviews request failed.'
+      });
+    }
     return;
   }
 
@@ -377,37 +567,34 @@ async function proxyGoogleReviews(reqUrl, res) {
   findPlaceUrl.searchParams.set('fields', 'place_id,name,rating,user_ratings_total');
   findPlaceUrl.searchParams.set('key', GOOGLE_PLACES_API_KEY);
 
-  try {
-    const placeResp = await fetch(findPlaceUrl);
+  const requestPromise = (async () => {
+    const { response: placeResp, payload: placePayload } = await fetchJsonWithTimeout(findPlaceUrl);
     if (!placeResp.ok) {
-      sendJson(res, placeResp.status, {
+      return {
         enabled: false,
         source: 'fallback',
         reviews: [],
         error: 'Failed to search Google Places candidates.'
-      });
-      return;
+      };
     }
 
-    const placePayload = await placeResp.json();
     const placeStatus = String(placePayload?.status || '').trim().toUpperCase();
     const placeError = String(placePayload?.error_message || '').trim();
 
     if (placeStatus && placeStatus !== 'OK' && placeStatus !== 'ZERO_RESULTS') {
-      sendJson(res, 200, {
+      return {
         enabled: false,
         source: 'google',
         reviews: [],
         error: placeError || `Google Places findplace failed with status ${placeStatus}.`
-      });
-      return;
+      };
     }
 
     const candidate = Array.isArray(placePayload?.candidates) ? placePayload.candidates[0] : null;
     const placeId = String(candidate?.place_id || '').trim();
 
     if (!placeId) {
-      const payload = {
+      return {
         enabled: false,
         source: 'google',
         reviews: [],
@@ -415,14 +602,6 @@ async function proxyGoogleReviews(reqUrl, res) {
         rating: Number.isFinite(Number(candidate?.rating)) ? Number(candidate.rating) : null,
         userRatingsTotal: Number.isFinite(Number(candidate?.user_ratings_total)) ? Number(candidate.user_ratings_total) : null
       };
-
-      googleReviewsCache.set(cacheKey, {
-        expiresAt: now + GOOGLE_REVIEWS_CACHE_TTL_MS,
-        payload
-      });
-
-      sendJson(res, 200, payload);
-      return;
     }
 
     const detailsUrl = new URL('https://maps.googleapis.com/maps/api/place/details/json');
@@ -431,33 +610,29 @@ async function proxyGoogleReviews(reqUrl, res) {
     detailsUrl.searchParams.set('reviews_sort', 'newest');
     detailsUrl.searchParams.set('key', GOOGLE_PLACES_API_KEY);
 
-    const detailsResp = await fetch(detailsUrl);
+    const { response: detailsResp, payload: detailsPayload } = await fetchJsonWithTimeout(detailsUrl);
     if (!detailsResp.ok) {
-      sendJson(res, detailsResp.status, {
+      return {
         enabled: false,
         source: 'fallback',
         reviews: [],
         error: 'Failed to fetch Google Place details.'
-      });
-      return;
+      };
     }
 
-    const detailsPayload = await detailsResp.json();
     const detailsStatus = String(detailsPayload?.status || '').trim().toUpperCase();
     const detailsError = String(detailsPayload?.error_message || '').trim();
 
     if (detailsStatus && detailsStatus !== 'OK' && detailsStatus !== 'ZERO_RESULTS') {
-      sendJson(res, 200, {
+      return {
         enabled: false,
         source: 'google',
         reviews: [],
         error: detailsError || `Google Places details failed with status ${detailsStatus}.`
-      });
-      return;
+      };
     }
 
     const result = detailsPayload?.result || {};
-
     const reviews = (Array.isArray(result?.reviews) ? result.reviews : [])
       .map(review => ({
         author: String(review?.author_name || 'Google user').trim(),
@@ -469,7 +644,7 @@ async function proxyGoogleReviews(reqUrl, res) {
       .filter(review => !!review.text)
       .slice(0, 5);
 
-    const payload = {
+    return {
       enabled: reviews.length > 0,
       source: 'google',
       placeName: String(result?.name || candidate?.name || '').trim(),
@@ -482,20 +657,28 @@ async function proxyGoogleReviews(reqUrl, res) {
       placeUrl: String(result?.url || '').trim(),
       reviews
     };
+  })();
 
+  googleReviewsInFlight.set(cacheKey, requestPromise);
+  try {
+    const payload = await requestPromise;
     googleReviewsCache.set(cacheKey, {
       expiresAt: now + GOOGLE_REVIEWS_CACHE_TTL_MS,
       payload
     });
-
     sendJson(res, 200, payload);
   } catch (error) {
-    sendJson(res, 502, {
+    const isAbort = String(error?.name || '').toLowerCase() === 'aborterror';
+    sendJson(res, 200, {
       enabled: false,
       source: 'fallback',
       reviews: [],
-      error: `Failed to fetch Google reviews: ${String(error)}`
+      error: isAbort
+        ? 'Google reviews request timed out. Please try again.'
+        : `Failed to fetch Google reviews: ${String(error)}`
     });
+  } finally {
+    googleReviewsInFlight.delete(cacheKey);
   }
 }
 
@@ -554,6 +737,7 @@ async function proxyReverseGeocode(reqUrl, res) {
     return;
   }
 
+  pruneExpiringCache(geoLocationCache, GEO_LOCATION_CACHE_MAX_ENTRIES);
   const cacheKey = `${lat.toFixed(5)},${lon.toFixed(5)}`;
   const now = Date.now();
   const cached = geoLocationCache.get(cacheKey);
@@ -658,43 +842,49 @@ async function parseIntentWithFoundry(queryText, context) {
     response_format: { type: 'json_object' }
   };
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 4000);
+  const rawContent = await callFoundryJsonObject(endpoint, requestBody, 4000);
+  const parsed = parseJsonObject(rawContent);
+  const validation = validateIntentCandidate(parsed);
 
-  try {
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'api-key': FOUNDRY_API_KEY
-      },
-      body: JSON.stringify(requestBody),
-      signal: controller.signal
-    });
-
-    if (!response.ok) {
-      return makeFallbackIntent(queryText);
-    }
-
-    const payload = await response.json();
-    const rawContent = payload?.choices?.[0]?.message?.content;
-    if (!rawContent || typeof rawContent !== 'string') {
-      return makeFallbackIntent(queryText);
-    }
-
-    let parsed;
-    try {
-      parsed = JSON.parse(rawContent);
-    } catch (err) {
-      return makeFallbackIntent(queryText);
-    }
-
+  if (validation.valid) {
     return normalizeIntentResponse(parsed, queryText);
-  } catch (err) {
-    return makeFallbackIntent(queryText);
-  } finally {
-    clearTimeout(timeout);
   }
+
+  const repairSystemPrompt = [
+    'Repair the intent JSON so it strictly matches this schema and types:',
+    '{queryRewrite:string,location:string,partySize:int|null,constraints:{dogFriendly:boolean|null,rv:boolean|null,tent:boolean|null,waterfront:boolean|null,maxPrice:number|null},priorities:string[<=6],clarificationQuestions:string[<=3],confidence:number(0..1)}.',
+    'Return JSON only.',
+    'Do not include extra keys.',
+    'Use null for unknown values.'
+  ].join(' ');
+
+  const repairBody = {
+    messages: [
+      { role: 'system', content: repairSystemPrompt },
+      {
+        role: 'user',
+        content: JSON.stringify({
+          query: String(queryText || '').slice(0, 220),
+          context: compactContext,
+          invalidOutput: String(rawContent || '').slice(0, 2000),
+          validationErrors: validation.issues.slice(0, 8)
+        })
+      }
+    ],
+    temperature: 0,
+    max_completion_tokens: 180,
+    response_format: { type: 'json_object' }
+  };
+
+  const repairedRaw = await callFoundryJsonObject(endpoint, repairBody, 4000);
+  const repairedParsed = parseJsonObject(repairedRaw);
+  const repairedValidation = validateIntentCandidate(repairedParsed);
+
+  if (!repairedValidation.valid) {
+    return makeFallbackIntent(queryText);
+  }
+
+  return normalizeIntentResponse(repairedParsed, queryText);
 }
 
 function makeFallbackJudge(candidateIds = []) {
@@ -909,6 +1099,10 @@ function handleAppConfig(res) {
 }
 
 const server = http.createServer(async (req, res) => {
+  Object.entries(SECURITY_HEADERS).forEach(([header, value]) => {
+    res.setHeader(header, value);
+  });
+
   const reqUrl = new URL(req.url, `http://${req.headers.host}`);
 
   if (reqUrl.pathname === '/api/config' && req.method === 'GET') {

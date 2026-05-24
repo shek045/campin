@@ -4,6 +4,7 @@
   "private": true,
   "description": "Campin prototype with local API proxy for Recreation.gov and NPS.",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "eval:intent": "node scripts/eval-intent.js"
   }
 }

@@ -59,8 +59,8 @@ export function createApiClient(apiBaseUrl) {
       return requestJson(buildUrl(apiBaseUrl, '/media/photos', { query }));
     },
 
-    getGoogleReviews(query) {
-      return requestJson(buildUrl(apiBaseUrl, '/google/reviews', { query }));
+    getGoogleReviews(query, options = {}) {
+      return requestJson(buildUrl(apiBaseUrl, '/google/reviews', { query }), options);
     },
 
     reverseGeocode(lat, lon) {
