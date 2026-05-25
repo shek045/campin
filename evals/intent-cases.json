@@ -1,0 +1,168 @@
+[
+  {
+    "id": "near-seattle-dog-water",
+    "query": "quiet lakeside campsite near Seattle that allows dogs",
+    "context": {
+      "dateSelection": "Jun 6-8",
+      "guestSelection": "2 guests",
+      "activePills": ["dog-friendly"]
+    },
+    "expect": {
+      "locationIncludes": ["seattle"],
+      "constraintsTrue": ["dogFriendly", "waterfront"],
+      "minConfidence": 0.4
+    }
+  },
+  {
+    "id": "rv-budget-yosemite",
+    "query": "RV campground near Yosemite under $60/night",
+    "context": {
+      "dateSelection": "Jul 12-15",
+      "guestSelection": "4 guests",
+      "activePills": ["rv", "budget"]
+    },
+    "expect": {
+      "locationIncludes": ["yosemite"],
+      "constraintsTrue": ["rv"],
+      "requireMaxPrice": true,
+      "minConfidence": 0.4
+    }
+  },
+  {
+    "id": "glacier-tent",
+    "query": "best tent camping around Glacier National Park",
+    "context": {
+      "dateSelection": "Aug 9-11",
+      "guestSelection": "3 guests",
+      "activePills": ["tent"]
+    },
+    "expect": {
+      "locationIncludes": ["glacier"],
+      "constraintsTrue": ["tent"],
+      "minConfidence": 0.35
+    }
+  },
+  {
+    "id": "smokies-family",
+    "query": "family campground in Great Smoky Mountains with restrooms",
+    "context": {
+      "dateSelection": "Sep 2-5",
+      "guestSelection": "5 guests",
+      "activePills": []
+    },
+    "expect": {
+      "locationIncludes": ["smoky"],
+      "minConfidence": 0.35
+    }
+  },
+  {
+    "id": "acadia-waterfront",
+    "query": "waterfront campground near Acadia",
+    "context": {
+      "dateSelection": "Jun 20-22",
+      "guestSelection": "2 guests",
+      "activePills": ["waterfront"]
+    },
+    "expect": {
+      "locationIncludes": ["acadia"],
+      "constraintsTrue": ["waterfront"],
+      "minConfidence": 0.35
+    }
+  },
+  {
+    "id": "big-bend-quiet",
+    "query": "quiet stargazing camp in Big Bend",
+    "context": {
+      "dateSelection": "Oct 10-12",
+      "guestSelection": "2 guests",
+      "activePills": ["quiet"]
+    },
+    "expect": {
+      "locationIncludes": ["big bend"],
+      "minConfidence": 0.3
+    }
+  },
+  {
+    "id": "mount-rainier-party-size",
+    "query": "need campsite near Mount Rainier for 6 people",
+    "context": {
+      "dateSelection": "Aug 1-3",
+      "guestSelection": "6 guests",
+      "activePills": []
+    },
+    "expect": {
+      "locationIncludes": ["rainier"],
+      "partySize": 6,
+      "minConfidence": 0.35
+    }
+  },
+  {
+    "id": "ambiguous-query",
+    "query": "camp this weekend",
+    "context": {
+      "dateSelection": "",
+      "guestSelection": "",
+      "activePills": []
+    },
+    "expect": {
+      "requireClarificationQuestions": true,
+      "maxConfidence": 0.6
+    }
+  },
+  {
+    "id": "dog-rv-budget-colorado",
+    "query": "dog friendly rv campground in Colorado under 80",
+    "context": {
+      "dateSelection": "Jul 5-8",
+      "guestSelection": "2 guests",
+      "activePills": ["dog-friendly", "rv"]
+    },
+    "expect": {
+      "locationIncludes": ["colorado"],
+      "constraintsTrue": ["dogFriendly", "rv"],
+      "requireMaxPrice": true,
+      "minConfidence": 0.4
+    }
+  },
+  {
+    "id": "olympic-forest-tent",
+    "query": "forest tent sites in Olympic National Park",
+    "context": {
+      "dateSelection": "Jun 14-16",
+      "guestSelection": "2 guests",
+      "activePills": ["tent"]
+    },
+    "expect": {
+      "locationIncludes": ["olympic"],
+      "constraintsTrue": ["tent"],
+      "minConfidence": 0.35
+    }
+  },
+  {
+    "id": "yellowstone-rv-hookups",
+    "query": "Yellowstone rv site with electric hookups",
+    "context": {
+      "dateSelection": "Jul 21-24",
+      "guestSelection": "4 guests",
+      "activePills": ["rv"]
+    },
+    "expect": {
+      "locationIncludes": ["yellowstone"],
+      "constraintsTrue": ["rv"],
+      "minConfidence": 0.35
+    }
+  },
+  {
+    "id": "pnw-waterfall-dogs",
+    "query": "camp near waterfalls in Pacific Northwest and bring my dog",
+    "context": {
+      "dateSelection": "Aug 18-20",
+      "guestSelection": "2 guests",
+      "activePills": ["dog-friendly"]
+    },
+    "expect": {
+      "constraintsTrue": ["dogFriendly"],
+      "minConfidence": 0.25
+    }
+  }
+]

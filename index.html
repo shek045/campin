@@ -13,12 +13,12 @@
 
 <!-- NAV -->
 <nav>
-  <div class="nav-logo" onclick="goHome()">
+  <button type="button" class="nav-logo" onclick="goHome()" aria-label="Go to Campin home">
     <span class="logo-mark" aria-hidden="true">
       <span class="logo-glyph"></span>
     </span>
     <span class="logo-word">campin</span>
-  </div>
+  </button>
   <div class="nav-links">
     <button class="nav-link nav-link-btn" id="nav-explore" onclick="openExplore()">Explore</button>
     <button class="nav-link nav-link-btn" id="nav-search" onclick="goHome()">Search</button>
@@ -73,10 +73,10 @@
                 <option>6+ guests</option>
               </select>
             </div>
-            <div class="filter-pill" onclick="togglePill(this)">⛺ Tent</div>
-            <div class="filter-pill" onclick="togglePill(this)">🚌 RV</div>
-            <div class="filter-pill" onclick="togglePill(this)">🐕 Dog-friendly</div>
-            <div class="filter-pill" onclick="togglePill(this)">🔥 Campfire</div>
+            <button type="button" class="filter-pill" onclick="togglePill(this)">⛺ Tent</button>
+            <button type="button" class="filter-pill" onclick="togglePill(this)">🚌 RV</button>
+            <button type="button" class="filter-pill" onclick="togglePill(this)">🐕 Dog-friendly</button>
+            <button type="button" class="filter-pill" onclick="togglePill(this)">🔥 Campfire</button>
           </div>
         </div>
       </div>
@@ -179,7 +179,7 @@
 
 <!-- ===== VIEW 4: CAMPSITE DETAIL ===== -->
 <div class="view" id="view-detail">
-  <div class="page-back" onclick="showView('results')">← Back to results</div>
+  <button type="button" class="page-back" onclick="showView('results')">← Back to results</button>
 
   <div class="detail-hero">
     <div class="detail-photo" style="background:#C5D9C0" id="d-photo-1">🌲</div>
@@ -191,7 +191,7 @@
 
   <div class="detail-body">
     <div class="detail-main">
-      <div class="detail-breadcrumb" id="d-breadcrumb" onclick="showView('results')">← Listing details</div>
+      <button type="button" class="detail-breadcrumb" id="d-breadcrumb" onclick="showView('results')">← Listing details</button>
       <h1 class="detail-title" id="d-name">Lakeshore Haven Camp</h1>
       <div class="detail-meta" id="d-meta">
         <span>⭐ <strong>4.92</strong> · 138 reviews</span>
@@ -222,19 +222,6 @@
       </div>
 
       <div class="detail-section">
-        <div class="detail-section-title" id="d-availability-title">Availability</div>
-        <div class="avail-cal">
-          <div class="cal-header">
-            <button class="cal-nav-btn">‹</button>
-            <span class="cal-month" id="d-availability-month">Live availability preview</span>
-            <button class="cal-nav-btn">›</button>
-          </div>
-          <div class="cal-grid" id="detail-cal"></div>
-          <p class="detail-cal-note" id="d-cal-note">Exact day-by-day inventory is provided on the booking provider page.</p>
-        </div>
-      </div>
-
-      <div class="detail-section">
         <div class="detail-section-title">Reviews</div>
         <div id="d-reviews">
           <div class="review-card">
@@ -249,10 +236,8 @@
 
       <div class="detail-section">
         <div class="detail-section-title">Location</div>
-        <div class="map-mock">
-          <div class="map-pin"></div>
-          <div class="map-label" id="d-map-label">Listing location</div>
-        </div>
+        <div class="map-mock" id="d-location-map"></div>
+        <div class="map-label" id="d-map-label">Listing location</div>
         <p class="detail-location-note" id="d-location-note">Exact driving directions are available on the booking provider page.</p>
       </div>
     </div>
@@ -267,20 +252,20 @@
         <div class="booking-dates">
           <div class="booking-date-row">
             <div class="date-field">
-              <label>Check-in</label>
+              <label for="checkin-date">Check-in</label>
               <input type="date" value="2025-06-06" id="checkin-date">
             </div>
             <div class="date-field">
-              <label>Check-out</label>
+              <label for="checkout-date">Check-out</label>
               <input type="date" value="2025-06-08" id="checkout-date">
             </div>
           </div>
           <div class="guests-field">
-            <label>Guests</label>
+            <span class="form-label">Guests</span>
             <div class="guests-control">
-              <button class="guests-btn" onclick="changeGuests(-1)">−</button>
+              <button type="button" class="guests-btn" aria-label="Decrease guests" onclick="changeGuests(-1)">−</button>
               <span class="guests-count" id="guest-count">2</span>
-              <button class="guests-btn" onclick="changeGuests(1)">+</button>
+              <button type="button" class="guests-btn" aria-label="Increase guests" onclick="changeGuests(1)">+</button>
             </div>
           </div>
         </div>
@@ -300,7 +285,7 @@
 
 <!-- ===== VIEW 5: CHECKOUT ===== -->
 <div class="view" id="view-checkout">
-  <div class="page-back" onclick="showView('detail')">← Back to campsite</div>
+  <button type="button" class="page-back" onclick="showView('detail')">← Back to campsite</button>
   <div class="checkout-layout">
     <div>
       <h1 class="checkout-title">Confirm your reservation</h1>
@@ -308,7 +293,7 @@
       <div class="checkout-section">
         <div class="checkout-section-head">
           <span class="checkout-section-title">Your trip details</span>
-          <span class="edit-link" onclick="showView('detail')">Edit</span>
+          <button type="button" class="edit-link" onclick="showView('detail')">Edit</button>
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem;">
           <div>
@@ -334,28 +319,28 @@
         </div>
         <div class="form-row">
           <div class="form-group">
-            <label class="form-label">First name</label>
-            <input class="form-input" type="text" placeholder="Alex">
+            <label class="form-label" for="checkout-first-name">First name</label>
+            <input class="form-input" id="checkout-first-name" type="text" placeholder="Alex">
           </div>
           <div class="form-group">
-            <label class="form-label">Last name</label>
-            <input class="form-input" type="text" placeholder="Smith">
-          </div>
-        </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label class="form-label">Email address</label>
-            <input class="form-input" type="email" placeholder="alex@example.com">
-          </div>
-          <div class="form-group">
-            <label class="form-label">Phone number</label>
-            <input class="form-input" type="tel" placeholder="+1 (555) 000-0000">
+            <label class="form-label" for="checkout-last-name">Last name</label>
+            <input class="form-input" id="checkout-last-name" type="text" placeholder="Smith">
           </div>
         </div>
         <div class="form-row">
           <div class="form-group">
-            <label class="form-label">Emergency contact</label>
-            <input class="form-input" type="text" placeholder="Name + phone number">
+            <label class="form-label" for="checkout-email">Email address</label>
+            <input class="form-input" id="checkout-email" type="email" placeholder="alex@example.com">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="checkout-phone">Phone number</label>
+            <input class="form-input" id="checkout-phone" type="tel" placeholder="+1 (555) 000-0000">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label" for="checkout-emergency">Emergency contact</label>
+            <input class="form-input" id="checkout-emergency" type="text" placeholder="Name + phone number">
           </div>
         </div>
       </div>
@@ -372,22 +357,22 @@
         </div>
         <div class="form-row">
           <div class="form-group">
-            <label class="form-label">Card number</label>
-            <input class="form-input" type="text" placeholder="1234 5678 9012 3456">
+            <label class="form-label" for="payment-card-number">Card number</label>
+            <input class="form-input" id="payment-card-number" type="text" placeholder="1234 5678 9012 3456">
           </div>
         </div>
         <div class="form-row">
           <div class="form-group">
-            <label class="form-label">Expiry</label>
-            <input class="form-input" type="text" placeholder="MM / YY">
+            <label class="form-label" for="payment-expiry">Expiry</label>
+            <input class="form-input" id="payment-expiry" type="text" placeholder="MM / YY">
           </div>
           <div class="form-group">
-            <label class="form-label">CVV</label>
-            <input class="form-input" type="text" placeholder="•••">
+            <label class="form-label" for="payment-cvv">CVV</label>
+            <input class="form-input" id="payment-cvv" type="text" placeholder="•••">
           </div>
           <div class="form-group">
-            <label class="form-label">ZIP</label>
-            <input class="form-input" type="text" placeholder="98101">
+            <label class="form-label" for="payment-zip">ZIP</label>
+            <input class="form-input" id="payment-zip" type="text" placeholder="98101">
           </div>
         </div>
       </div>
@@ -402,7 +387,7 @@
           🐕 Dogs must be on leash at all times. Max 2 dogs per site.<br>
           🔥 Campfires permitted in designated rings only. Check fire bans.<br>
           🤫 Quiet hours: 10PM – 7AM.<br><br>
-          By clicking "Confirm Reservation" you agree to Campin's <a>Terms of Service</a> and the park's <a>campground rules</a>.
+          By clicking "Confirm Reservation" you agree to Campin's <a href="https://example.com/terms" target="_blank" rel="noopener noreferrer">Terms of Service</a> and the park's <a href="https://example.com/campground-rules" target="_blank" rel="noopener noreferrer">campground rules</a>.
         </p>
       </div>
     </div>
@@ -454,8 +439,8 @@
 
     <div class="confirm-actions">
       <button class="action-btn" onclick="goHome()">🏕 Find more campsites</button>
-      <button class="action-btn" onclick="">📋 View itinerary</button>
-      <button class="action-btn primary" onclick="">📲 Download app</button>
+      <button class="action-btn" onclick="viewItinerary()">📋 View itinerary</button>
+      <button class="action-btn primary" onclick="downloadCampinApp()">📲 Download app</button>
     </div>
   </div>
 </div>

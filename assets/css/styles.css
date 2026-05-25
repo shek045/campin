@@ -50,6 +50,9 @@
     font-weight: 700;
     color: #1f1f1f;
     cursor: pointer;
+    border: none;
+    background: transparent;
+    padding: 0;
     display: flex; align-items: center; gap: 10px;
     letter-spacing: 0.01em;
   }
@@ -248,6 +251,7 @@
     border: 1px solid var(--border);
     border-radius: 100px;
     padding: 6px 14px;
+    font-family: 'DM Sans', sans-serif;
     font-size: 0.8rem; font-weight: 500;
     color: var(--text-mid);
     cursor: pointer; transition: all 0.15s;
@@ -913,7 +917,11 @@
   .detail-breadcrumb {
     font-size: 0.82rem; color: var(--text-soft);
     margin-bottom: 1rem; cursor: pointer;
+    border: none;
+    background: transparent;
+    padding: 0;
     display: flex; align-items: center; gap: 6px;
+    text-align: left;
   }
   .detail-breadcrumb:hover { color: var(--forest); }
   .detail-title {
@@ -1062,7 +1070,16 @@
     margin-bottom: 1.25rem;
   }
   .checkout-section-title { font-size: 1rem; font-weight: 600; }
-  .edit-link { font-size: 0.82rem; color: var(--forest); cursor: pointer; font-weight: 500; text-decoration: underline; }
+  .edit-link {
+    font-size: 0.82rem;
+    color: var(--forest);
+    cursor: pointer;
+    font-weight: 500;
+    text-decoration: underline;
+    border: none;
+    background: transparent;
+    padding: 0;
+  }
   .form-row { display: flex; gap: 12px; margin-bottom: 12px; }
   .form-group { flex: 1; }
   .form-label { display: block; font-size: 0.75rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--stone); margin-bottom: 5px; }
@@ -1154,34 +1171,31 @@
     display: flex; align-items: center; gap: 8px;
   }
 
-  /* MAP MOCK */
+  /* LOCATION MAP */
   .map-mock {
     background: #d8e8d4;
     border-radius: var(--radius-sm);
     height: 220px; position: relative; overflow: hidden;
     margin-bottom: 1rem;
-    display: flex; align-items: center; justify-content: center;
     border: 1px solid var(--border);
+  }
+  .map-mock iframe {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    display: block;
+  }
+  .map-mock.empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
   .map-label {
     font-size: 0.9rem; font-weight: 600; color: var(--forest);
     background: white; padding: 6px 14px; border-radius: 100px;
     box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-  }
-  .map-pin {
-    position: absolute;
-    width: 20px; height: 20px;
-    background: var(--forest-light); border-radius: 50% 50% 50% 0;
-    transform: rotate(-45deg);
-    top: 50%; left: 50%; margin: -10px 0 0 -10px;
-    box-shadow: 0 2px 6px rgba(0,0,0,0.2);
-  }
-  .map-pin::after {
-    content: '';
-    position: absolute; top: 50%; left: 50%;
-    transform: translate(-50%, -50%);
-    width: 8px; height: 8px;
-    background: white; border-radius: 50%;
+    display: inline-flex;
+    margin-bottom: 0.75rem;
   }
 
   /* AVAILABILITY CALENDAR */
@@ -1227,6 +1241,11 @@
     font-size: 0.85rem; color: var(--text-soft);
     cursor: pointer; padding: 0.75rem 2rem;
     border-bottom: 1px solid var(--border);
+    border-left: none;
+    border-right: none;
+    border-top: none;
+    width: 100%;
+    text-align: left;
     background: white;
   }
   .page-back:hover { color: var(--forest); }
