@@ -1,6 +1,19 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { publicFile, readJsonBody, createRateLimiter, validateApiParams } = require('./lib/http');
+const { createProviderFetcher } = require('./lib/providers');
+const fetchProvider = createProviderFetcher({
+  allowedHosts: [
+    'ridb.recreation.gov',
+    'www.recreation.gov',
+    'developer.nps.gov',
+    'commons.wikimedia.org',
+    'maps.googleapis.com'
+  ]
+});
+const allowApiRequest = createRateLimiter();
+const allowAiRequest = createRateLimiter({ limit: 12 });
 
 function loadDotEnv(filePath) {
   if (!fs.existsSync(filePath)) {
@@ -31,10 +44,10 @@ function loadDotEnv(filePath) {
   });
 }
 
-loadDotEnv(path.join(process.cwd(), '.env'));
+loadDotEnv(path.join(__dirname, '.env'));
 
 const PORT = Number(process.env.PORT || 5500);
-const ROOT = process.cwd();
+const ROOT = __dirname;
 
 const REC_API_KEY = process.env.REC_API_KEY || '';
 const NPS_API_KEY = process.env.NPS_API_KEY || '';
@@ -58,7 +71,7 @@ const SECURITY_HEADERS = {
   'X-Frame-Options': 'DENY',
   'Referrer-Policy': 'strict-origin-when-cross-origin',
   'Permissions-Policy': 'geolocation=(), microphone=(), camera=()',
-  'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' https: data:; connect-src 'self' https:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+  'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' https: data:; connect-src 'self'; frame-src https://maps.google.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 };
 
 const MIME_TYPES = {
@@ -103,22 +116,8 @@ function pruneExpiringCache(cache, maxEntries) {
 }
 
 async function fetchJsonWithTimeout(url, timeoutMs = GOOGLE_REVIEWS_UPSTREAM_TIMEOUT_MS) {
-  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-  let timeoutId = null;
-
-  if (controller && Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0) {
-    timeoutId = setTimeout(() => controller.abort(), Number(timeoutMs));
-  }
-
-  try {
-    const response = await fetch(url, controller ? { signal: controller.signal } : undefined);
-    const payload = await response.json().catch(() => ({}));
-    return { response, payload };
-  } finally {
-    if (timeoutId) {
-      clearTimeout(timeoutId);
-    }
-  }
+  const { status, payload } = await fetchProvider(url);
+  return { response: { ok: status >= 200 && status < 300, status }, payload };
 }
 
 function makeFallbackIntent(queryText = '') {
@@ -323,31 +322,7 @@ async function callFoundryJsonObject(endpoint, requestBody, timeoutMs) {
 }
 
 function readRequestBody(req) {
-  return new Promise((resolve, reject) => {
-    let data = '';
-
-    req.on('data', chunk => {
-      data += chunk;
-      if (data.length > 1_000_000) {
-        reject(new Error('Request body too large.'));
-      }
-    });
-
-    req.on('end', () => {
-      if (!data) {
-        resolve({});
-        return;
-      }
-
-      try {
-        resolve(JSON.parse(data));
-      } catch (err) {
-        reject(new Error('Invalid JSON body.'));
-      }
-    });
-
-    req.on('error', reject);
-  });
+  return readJsonBody(req);
 }
 
 function sendFile(res, filePath) {
@@ -368,16 +343,7 @@ function sendFile(res, filePath) {
 }
 
 function safeResolvePath(urlPathname) {
-  const decodedPath = decodeURIComponent(urlPathname);
-  const normalized = path.normalize(decodedPath).replace(/^[/\\]+/, '');
-  const resolved = path.resolve(ROOT, normalized);
-
-  const relative = path.relative(ROOT, resolved);
-  if (relative.startsWith('..') || path.isAbsolute(relative)) {
-    return null;
-  }
-
-  return resolved;
+  return publicFile(ROOT, urlPathname);
 }
 
 async function proxyRidbFacilities(reqUrl, res) {
@@ -392,20 +358,21 @@ async function proxyRidbFacilities(reqUrl, res) {
   const upstream = new URL('https://ridb.recreation.gov/api/v1/facilities');
   upstream.searchParams.set('query', query);
   upstream.searchParams.set('limit', limit);
+  for (const key of ['latitude', 'longitude', 'radius']) {
+    if (reqUrl.searchParams.has(key)) upstream.searchParams.set(key, reqUrl.searchParams.get(key));
+  }
 
   try {
-    const response = await fetch(upstream, {
+    const result = await fetchProvider(upstream, {
       headers: {
         apikey: REC_API_KEY,
         Accept: 'application/json'
       }
     });
 
-    const text = await response.text();
-    res.writeHead(response.status, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(text);
+    sendJson(res, result.status, result.payload);
   } catch (error) {
-    sendJson(res, 502, { error: 'Failed to fetch RIDB facilities.', details: String(error) });
+    sendJson(res, 502, { error: 'RIDB facilities are temporarily unavailable.' });
   }
 }
 
@@ -415,26 +382,30 @@ async function proxyRidbCampsites(reqUrl, res, facilityId) {
     return;
   }
 
+  const id = String(facilityId);
+  if (!/^\d{1,12}$/.test(id)) {
+    sendJson(res, 400, { error: 'Invalid facility ID.' });
+    return;
+  }
+
   const limit = reqUrl.searchParams.get('limit') || '200';
   const offset = reqUrl.searchParams.get('offset') || '0';
 
-  const upstream = new URL(`https://ridb.recreation.gov/api/v1/facilities/${encodeURIComponent(String(facilityId))}/campsites`);
+  const upstream = new URL(`https://ridb.recreation.gov/api/v1/facilities/${id}/campsites`);
   upstream.searchParams.set('limit', limit);
   upstream.searchParams.set('offset', offset);
 
   try {
-    const response = await fetch(upstream, {
+    const result = await fetchProvider(upstream, {
       headers: {
         apikey: REC_API_KEY,
         Accept: 'application/json'
       }
     });
 
-    const text = await response.text();
-    res.writeHead(response.status, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(text);
+    sendJson(res, result.status, result.payload);
   } catch (error) {
-    sendJson(res, 502, { error: 'Failed to fetch RIDB campsites.', details: String(error) });
+    sendJson(res, 502, { error: 'RIDB campsite details are temporarily unavailable.' });
   }
 }
 
@@ -453,28 +424,29 @@ async function proxyNpsCampgrounds(reqUrl, res) {
   upstream.searchParams.set('api_key', NPS_API_KEY);
 
   try {
-    const response = await fetch(upstream);
-    const text = await response.text();
-    res.writeHead(response.status, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(text);
+    const result = await fetchProvider(upstream);
+    sendJson(res, result.status, result.payload);
   } catch (error) {
-    sendJson(res, 502, { error: 'Failed to fetch NPS campgrounds.', details: String(error) });
+    sendJson(res, 502, { error: 'NPS campgrounds are temporarily unavailable.' });
   }
 }
 
 async function proxyRecreationAvailability(reqUrl, res, campgroundId) {
+  const id = String(campgroundId);
+  if (!/^\d{1,12}$/.test(id)) {
+    sendJson(res, 400, { error: 'Invalid campground ID.' });
+    return;
+  }
   const startDate = reqUrl.searchParams.get('start_date') || new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1)).toISOString();
 
-  const upstream = new URL(`https://www.recreation.gov/api/camps/availability/campground/${campgroundId}/month`);
+  const upstream = new URL(`https://www.recreation.gov/api/camps/availability/campground/${id}/month`);
   upstream.searchParams.set('start_date', startDate);
 
   try {
-    const response = await fetch(upstream);
-    const text = await response.text();
-    res.writeHead(response.status, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(text);
+    const result = await fetchProvider(upstream, {}, 30_000);
+    sendJson(res, result.status, result.payload);
   } catch (error) {
-    sendJson(res, 502, { error: 'Failed to fetch Recreation availability.', details: String(error) });
+    sendJson(res, 502, { error: 'Availability could not be checked. Try again.' });
   }
 }
 
@@ -499,13 +471,12 @@ async function proxyCampgroundPhotos(reqUrl, res) {
   upstream.searchParams.set('origin', '*');
 
   try {
-    const response = await fetch(upstream);
+    const { response, payload } = await fetchJsonWithTimeout(upstream);
     if (!response.ok) {
       sendJson(res, response.status, { error: 'Failed to fetch fallback campground photos.' });
       return;
     }
 
-    const payload = await response.json();
     const pages = payload?.query?.pages ? Object.values(payload.query.pages) : [];
     const photos = [...new Set(
       pages
@@ -515,7 +486,7 @@ async function proxyCampgroundPhotos(reqUrl, res) {
 
     sendJson(res, 200, { photos });
   } catch (error) {
-    sendJson(res, 502, { error: 'Failed to fetch fallback campground photos.', details: String(error) });
+    sendJson(res, 502, { error: 'Illustrative photos are temporarily unavailable.' });
   }
 }
 
@@ -675,7 +646,7 @@ async function proxyGoogleReviews(reqUrl, res) {
       reviews: [],
       error: isAbort
         ? 'Google reviews request timed out. Please try again.'
-        : `Failed to fetch Google reviews: ${String(error)}`
+        : 'Google reviews are temporarily unavailable.'
     });
   } finally {
     googleReviewsInFlight.delete(cacheKey);
@@ -732,7 +703,7 @@ async function proxyReverseGeocode(reqUrl, res) {
 
   const lat = Number(reqUrl.searchParams.get('lat'));
   const lon = Number(reqUrl.searchParams.get('lon'));
-  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+  if (!reqUrl.searchParams.has('lat') || !reqUrl.searchParams.has('lon') || !Number.isFinite(lat) || !Number.isFinite(lon)) {
     sendJson(res, 400, { error: 'lat and lon are required.' });
     return;
   }
@@ -751,7 +722,7 @@ async function proxyReverseGeocode(reqUrl, res) {
   geocodeUrl.searchParams.set('key', GOOGLE_PLACES_API_KEY);
 
   try {
-    const response = await fetch(geocodeUrl);
+    const { response, payload } = await fetchJsonWithTimeout(geocodeUrl);
     if (!response.ok) {
       sendJson(res, response.status, {
         enabled: false,
@@ -760,7 +731,6 @@ async function proxyReverseGeocode(reqUrl, res) {
       return;
     }
 
-    const payload = await response.json();
     const status = String(payload?.status || '').trim().toUpperCase();
     const errorMessage = String(payload?.error_message || '').trim();
     if (status && status !== 'OK' && status !== 'ZERO_RESULTS') {
@@ -793,8 +763,38 @@ async function proxyReverseGeocode(reqUrl, res) {
   } catch (error) {
     sendJson(res, 502, {
       enabled: false,
-      error: `Failed to reverse geocode location: ${String(error)}`
+      error: 'Location lookup is temporarily unavailable.'
     });
+  }
+}
+
+async function proxySearchLocation(reqUrl, res) {
+  if (!GOOGLE_PLACES_API_KEY) {
+    sendJson(res, 503, { error: 'Location lookup is not configured.' });
+    return;
+  }
+  const query = (reqUrl.searchParams.get('query') || '').trim();
+  if (!query) {
+    sendJson(res, 400, { error: 'query is required.' });
+    return;
+  }
+  const upstream = new URL('https://maps.googleapis.com/maps/api/geocode/json');
+  upstream.searchParams.set('address', query);
+  upstream.searchParams.set('components', 'country:US');
+  upstream.searchParams.set('key', GOOGLE_PLACES_API_KEY);
+  try {
+    const { response, payload } = await fetchJsonWithTimeout(upstream);
+    const result = payload?.results?.[0];
+    const point = result?.geometry?.location;
+    if (!response.ok || payload.status !== 'OK' || !Number.isFinite(point?.lat) || !Number.isFinite(point?.lng)) {
+      sendJson(res, 200, { location: null });
+      return;
+    }
+    sendJson(res, 200, {
+      location: { lat: point.lat, lon: point.lng, label: result.formatted_address }
+    });
+  } catch {
+    sendJson(res, 502, { error: 'Location lookup is temporarily unavailable.' });
   }
 }
 
@@ -828,7 +828,7 @@ async function parseIntentWithFoundry(queryText, context) {
   };
 
   const userPayload = {
-    q: String(queryText || '').slice(0, 220),
+    q: String(queryText || '').slice(0, 1900),
     c: compactContext
   };
 
@@ -864,7 +864,7 @@ async function parseIntentWithFoundry(queryText, context) {
       {
         role: 'user',
         content: JSON.stringify({
-          query: String(queryText || '').slice(0, 220),
+          query: String(queryText || '').slice(0, 1900),
           context: compactContext,
           invalidOutput: String(rawContent || '').slice(0, 2000),
           validationErrors: validation.issues.slice(0, 8)
@@ -1059,11 +1059,16 @@ async function handleIntentParse(req, res) {
   try {
     body = await readRequestBody(req);
   } catch (err) {
-    sendJson(res, 400, { error: err.message });
+    sendJson(res, err.status || 400, { error: err.message });
     return;
   }
 
-  const queryText = String(body?.query || '').trim();
+  if (typeof body.query !== 'string' || body.query.length > 2000 ||
+      (body.context !== undefined && (!body.context || typeof body.context !== 'object' || Array.isArray(body.context)))) {
+    sendJson(res, 400, { error: 'Expected query text (up to 2000 characters) and an optional context object.' });
+    return;
+  }
+  const queryText = body.query.trim();
   const context = body?.context || {};
 
   if (!queryText) {
@@ -1080,11 +1085,18 @@ async function handleResultJudge(req, res) {
   try {
     body = await readRequestBody(req);
   } catch (err) {
-    sendJson(res, 400, { error: err.message });
+    sendJson(res, err.status || 400, { error: err.message });
     return;
   }
 
-  const queryText = String(body?.query || '').trim();
+  if (typeof body.query !== 'string' || body.query.length > 2000 ||
+      !Array.isArray(body.cards) || body.cards.length > 8 ||
+      body.cards.some(card => !card || typeof card !== 'object' || Array.isArray(card) || typeof card.id !== 'string') ||
+      (body.intent !== undefined && body.intent !== null && (typeof body.intent !== 'object' || Array.isArray(body.intent)))) {
+    sendJson(res, 400, { error: 'Invalid judge request. Supply query text and at most 8 candidate cards.' });
+    return;
+  }
+  const queryText = body.query.trim();
   const intent = body?.intent && typeof body.intent === 'object' ? body.intent : null;
   const cards = Array.isArray(body?.cards) ? body.cards : [];
 
@@ -1098,12 +1110,37 @@ function handleAppConfig(res) {
   });
 }
 
-const server = http.createServer(async (req, res) => {
+async function handleRequest(req, res) {
   Object.entries(SECURITY_HEADERS).forEach(([header, value]) => {
     res.setHeader(header, value);
   });
 
-  const reqUrl = new URL(req.url, `http://${req.headers.host}`);
+  let reqUrl;
+  try {
+    reqUrl = new URL(req.url, 'http://localhost');
+    decodeURIComponent(reqUrl.pathname);
+  } catch {
+    sendJson(res, 400, { error: 'Invalid request URL.' });
+    return;
+  }
+  if (reqUrl.pathname.startsWith('/api/')) {
+    const client = req.socket.remoteAddress || 'local';
+    if (!allowApiRequest(client) ||
+        (['/api/intent/parse', '/api/judge/results'].includes(reqUrl.pathname) && !allowAiRequest(client))) {
+      res.setHeader('Retry-After', '60');
+      sendJson(res, 429, { error: 'Too many requests. Please wait a minute.' });
+      return;
+    }
+    const error = validateApiParams(reqUrl);
+    if (error) {
+      sendJson(res, 400, { error });
+      return;
+    }
+    if (req.method === 'POST' && !/^application\/json(?:;|$)/i.test(req.headers['content-type'] || '')) {
+      sendJson(res, 415, { error: 'Use application/json.' });
+      return;
+    }
+  }
 
   if (reqUrl.pathname === '/api/config' && req.method === 'GET') {
     handleAppConfig(res);
@@ -1146,6 +1183,10 @@ const server = http.createServer(async (req, res) => {
     await proxyReverseGeocode(reqUrl, res);
     return;
   }
+  if (reqUrl.pathname === '/api/location/search' && req.method === 'GET') {
+    await proxySearchLocation(reqUrl, res);
+    return;
+  }
 
   if (reqUrl.pathname === '/api/intent/parse' && req.method === 'POST') {
     await handleIntentParse(req, res);
@@ -1157,21 +1198,37 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  let filePath = reqUrl.pathname === '/' ? path.join(ROOT, 'index.html') : safeResolvePath(reqUrl.pathname);
+  if (reqUrl.pathname.startsWith('/api/')) {
+    sendJson(res, 404, { error: 'API route not found.' });
+    return;
+  }
+  if (!['GET', 'HEAD'].includes(req.method)) {
+    res.setHeader('Allow', 'GET, HEAD');
+    sendJson(res, 405, { error: 'Method not allowed.' });
+    return;
+  }
+  const filePath = safeResolvePath(reqUrl.pathname);
   if (!filePath) {
     sendJson(res, 403, { error: 'Forbidden path' });
     return;
   }
 
-  fs.stat(filePath, (err, stats) => {
-    if (!err && stats.isDirectory()) {
-      filePath = path.join(filePath, 'index.html');
-    }
+  sendFile(res, filePath);
+}
 
-    sendFile(res, filePath);
+const server = http.createServer((req, res) => {
+  handleRequest(req, res).catch(() => {
+    if (!res.headersSent) sendJson(res, 500, { error: 'Request failed. Please try again.' });
+    else res.end();
   });
 });
+server.requestTimeout = 15_000;
+server.headersTimeout = 10_000;
 
-server.listen(PORT, () => {
-  console.log(`Campin server running at http://localhost:${PORT}`);
-});
+if (require.main === module) {
+  server.listen(PORT, '127.0.0.1', () => {
+    console.log(`Campin server running at http://localhost:${PORT}`);
+  });
+}
+
+module.exports = { server };

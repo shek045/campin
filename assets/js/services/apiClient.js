@@ -8,8 +8,20 @@ function buildUrl(apiBaseUrl, path, searchParams) {
   return url;
 }
 
-function requestJson(url, options = {}) {
-  return fetch(url, options);
+async function requestJson(url, options = {}) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (options.signal?.aborted) controller.abort();
+  options.signal?.addEventListener('abort', abort, { once: true });
+  const timer = setTimeout(abort, 12_000);
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    const payload = await response.json();
+    return { ok: response.ok, status: response.status, json: async () => payload };
+  } finally {
+    clearTimeout(timer);
+    options.signal?.removeEventListener('abort', abort);
+  }
 }
 
 export function createApiClient(apiBaseUrl) {
@@ -18,37 +30,42 @@ export function createApiClient(apiBaseUrl) {
       return requestJson(buildUrl(apiBaseUrl, '/config'));
     },
 
-    parseIntent(payload) {
+    parseIntent(payload, options = {}) {
       return requestJson(buildUrl(apiBaseUrl, '/intent/parse'), {
+        ...options,
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
     },
 
-    getRidbFacilities(query, limit = 12) {
-      return requestJson(buildUrl(apiBaseUrl, '/ridb/facilities', { query, limit }));
+    getRidbFacilities(query, limit = 12, options = {}, location = null) {
+      return requestJson(buildUrl(apiBaseUrl, '/ridb/facilities', {
+        query, limit, latitude: location?.lat, longitude: location?.lon,
+        radius: location ? (location.radiusKm ?? 50) : undefined
+      }), options);
     },
 
-    getRidbCampsites(facilityId, limit = 200, offset = 0) {
+    getRidbCampsites(facilityId, limit = 200, offset = 0, options = {}) {
       return requestJson(buildUrl(apiBaseUrl, `/ridb/facilities/${encodeURIComponent(String(facilityId))}/campsites`, {
         limit,
         offset
-      }));
+      }), options);
     },
 
-    getNpsCampgrounds(query, limit = 12) {
-      return requestJson(buildUrl(apiBaseUrl, '/nps/campgrounds', { q: query, limit }));
+    getNpsCampgrounds(query, limit = 12, options = {}) {
+      return requestJson(buildUrl(apiBaseUrl, '/nps/campgrounds', { q: query, limit }), options);
     },
 
-    getRecreationAvailability(campgroundId, startDate) {
+    getRecreationAvailability(campgroundId, startDate, options = {}) {
       return requestJson(buildUrl(apiBaseUrl, `/recreation/availability/${encodeURIComponent(String(campgroundId))}/month`, {
         start_date: startDate
-      }));
+      }), options);
     },
 
-    judgeResults(payload) {
+    judgeResults(payload, options = {}) {
       return requestJson(buildUrl(apiBaseUrl, '/judge/results'), {
+        ...options,
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -68,6 +85,10 @@ export function createApiClient(apiBaseUrl) {
         lat,
         lon
       }));
+    },
+
+    getSearchLocation(query, options = {}) {
+      return requestJson(buildUrl(apiBaseUrl, '/location/search', { query }), options);
     }
   };
 }

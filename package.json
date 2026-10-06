@@ -5,6 +5,12 @@
   "description": "Campin prototype with local API proxy for Recreation.gov and NPS.",
   "scripts": {
     "start": "node server.js",
+    "test": "node --test tests/*.test.js",
+    "check": "node scripts/check-syntax.js",
+    "test:browser": "playwright test",
     "eval:intent": "node scripts/eval-intent.js"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0"
   }
 }

@@ -1,6 +1,16 @@
 import { createApiClient } from './services/apiClient.js';
 import { calculateBookingBreakdown } from './domain/booking.js';
-import { renderResultsView } from './views/resultsView.js';
+import { renderResultsView, createResultCardElement } from './views/resultsView.js';
+import { isValidIsoDate, validateTrip, tripMonths, weekendTrip, stayFromQueryText, summarizeAvailability, availabilityLabel } from './domain/trip.js';
+import { evaluateRequirements, fallbackIntent, createSearchSession, compositeRelevanceScore, tokenizeQuery, RADIUS_SCHEDULE_KM } from './domain/search.js';
+import { EXPLORE_PLAN, REGION_STATES } from './domain/explore.js';
+import {
+  normalizeRidbFacilityRecord as normalizeRidb,
+  normalizeNpsCampgroundRecord as normalizeNps,
+  summarizeRidbCampsites as summarizeSites,
+  knownNumber, safeHttpUrl
+} from './domain/listings.js';
+import { createSavedListings } from './services/savedListings.js';
 
 // ---- API CONFIG ----
 const API_CONFIG = {
@@ -30,12 +40,25 @@ const cardPalettes = ['#C5D9C0', '#C8CDD4', '#B8CECD', '#BDD4B8', '#D4C9B8', '#C
 const emojis = ['🏕️', '🌲', '⛰️', '🌊', '🌿', '🏔️', '🏞️', '🌅'];
 
 let campsites = [];
-let currentCamp = mockCampsites[0];
+let currentCamp = null;
+let detailOrigin = 'results';
+let trip = { checkIn: null, checkOut: null };
+let lastSearchQuery = '';
+let searchError = '';
+let searchOrigin = null;
+const searchSessions = createSearchSession();
+const detailSessions = createSearchSession();
+let savedOnly = false;
+let storage;
+try { storage = window.localStorage; } catch { /* Private browsing may disable storage. */ }
+const savedListings = createSavedListings(storage);
+mockCampsites.forEach(camp => { camp.isDemo = true; camp.badge = 'Demo listing'; });
 let isLoadingResults = false;
 let inventorySourceText = 'Live inventory';
 let sourceDiagnostics = { ridbCount: 0, npsCount: 0 };
 let lastIntent = null;
 let pendingClarification = null;
+const exploreCampsiteSummaryCache = new Map();
 const photoLookupCache = new Map();
 const googleReviewsCache = new Map();
 const GOOGLE_REVIEWS_CACHE_TTL_MS = 30 * 60 * 1000;
@@ -52,24 +75,8 @@ const LOCATION_LABEL_CACHE_MAX_ENTRIES = 1000;
   const GOOGLE_REVIEWS_REQUEST_TIMEOUT_MS = 4500;
   const googleReviewsInFlight = new Map();
 
-const exploreQueryPlan = [
-  { region: 'west', query: 'Yosemite National Park campground' },
-  { region: 'west', query: 'Olympic National Park campground' },
-  { region: 'rockies', query: 'Yellowstone National Park campground' },
-  { region: 'rockies', query: 'Glacier National Park campground' },
-  { region: 'south', query: 'Great Smoky Mountains National Park campground' },
-  { region: 'south', query: 'Big Bend National Park campground' },
-  { region: 'midwest', query: 'Sleeping Bear Dunes campground' },
-  { region: 'northeast', query: 'Acadia National Park campground' }
-];
-
-const regionStates = {
-  west: ['WA', 'OR', 'CA', 'NV', 'AZ', 'UT', 'ID', 'MT', 'WY', 'CO', 'NM', 'AK', 'HI'],
-  rockies: ['MT', 'WY', 'CO', 'ID', 'UT'],
-  south: ['TX', 'OK', 'AR', 'LA', 'MS', 'AL', 'GA', 'FL', 'SC', 'NC', 'TN', 'KY', 'VA', 'WV'],
-  midwest: ['ND', 'SD', 'NE', 'KS', 'MN', 'IA', 'MO', 'WI', 'IL', 'MI', 'IN', 'OH'],
-  northeast: ['PA', 'NY', 'VT', 'NH', 'ME', 'MA', 'CT', 'RI', 'NJ', 'DE', 'MD']
-};
+// Explore inventory plan and region state lists live in ./domain/explore.js
+// (EXPLORE_PLAN, REGION_STATES) so they stay importable and unit-testable.
 let searchConversation = [];
 let chatMessageId = 0;
 let pendingAssistantMessageId = null;
@@ -102,6 +109,11 @@ let pendingAssistantMessageId = null;
     document.getElementById('view-' + name).classList.add('active');
     syncActiveNav(name);
     window.scrollTo(0, 0);
+    const heading = document.querySelector(`#view-${name} h1, #view-${name} .results-header-title`);
+    if (heading) {
+      heading.tabIndex = -1;
+      heading.focus({ preventScroll: true });
+    }
   }
 
   function syncActiveNav(viewName) {
@@ -119,6 +131,15 @@ let pendingAssistantMessageId = null;
   function goHome() { openSearch(); }
 
   function openSearch() {
+    searchSessions.cancel();
+    pendingClarification = null;
+    lastSearchQuery = '';
+    lastIntent = null;
+    searchConversation = [];
+    pendingAssistantMessageId = null;
+    syncSearchInputs('');
+    renderChatThreads();
+    setLoadingState(false);
     showView('home');
     updateSearchStageEmptyState();
 
@@ -132,6 +153,8 @@ let pendingAssistantMessageId = null;
   }
 
   function openExplore() {
+    searchSessions.cancel();
+    setLoadingState(false);
     showView('explore');
     if (!exploreLoaded && !isLoadingExplore) {
       refreshExplore();
@@ -197,38 +220,17 @@ let pendingAssistantMessageId = null;
       }
     };
 
-    if (summary.rvAllowed || /\brv\b|recreational vehicle|motorhome|hookup/.test(textCorpus)) {
+    if (summary.rvAllowed === true) {
       pushTag('RV-friendly');
     }
-    if (summary.tentAllowed || /tent/.test(textCorpus)) {
+    if (summary.tentAllowed === true) {
       pushTag('Tent-friendly');
     }
-    if (summary.electricHookup || /electric|power pedestal|power hookup/.test(textCorpus)) {
+    if (summary.electricHookup === true) {
       pushTag('Electric hookups');
     }
-    if (summary.accessible || /accessible|ada|wheelchair|universal access|meets accessibility standards/.test(textCorpus)) {
+    if (summary.accessible === true) {
       pushTag('Accessible sites');
-    }
-    if (/dog|pet friendly/.test(textCorpus)) {
-      pushTag('Dog-friendly');
-    }
-    if (/lake|river|ocean|beach|waterfront|water access|hot springs|stream|creek/.test(textCorpus)) {
-      pushTag('Water access');
-    }
-    if (/fire ring|fire pit|campfire/.test(textCorpus)) {
-      pushTag('Campfire sites');
-    }
-    if (/flush toilet|restroom|bathroom|potable water|water spigot|showers?/.test(textCorpus)) {
-      pushTag('Restrooms & water');
-    }
-    if (/picnic table|paved access|parking pad|gravel pad|pull-through/.test(textCorpus)) {
-      pushTag('Campsite basics');
-    }
-    if (/hiking trail|trail|trailhead|falls|forest|backcountry/.test(textCorpus)) {
-      pushTag('Trail access');
-    }
-    if (/hot spring|springs?/.test(textCorpus)) {
-      pushTag('Hot springs');
     }
 
     if (summary.count > 0) {
@@ -239,66 +241,15 @@ let pendingAssistantMessageId = null;
   }
 
   function buildIntentMatchReasons(camp) {
-    const intent = lastIntent;
-    if (!intent || intent.enabled !== true) {
-      return [];
-    }
-
-    const descriptionCorpus = [
-      camp.descriptionText,
-      camp.type,
-      camp.loc,
-      ...(Array.isArray(camp.tags) ? camp.tags : [])
-    ].join(' ').toLowerCase();
-
-    const reasons = [];
-    const location = String(intent.location || '').trim();
-    if (location) {
-      const locationTokens = tokenizeText(location);
-      const locationMatches = locationTokens.filter(token => descriptionCorpus.includes(token)).length;
-      if (locationTokens.length > 0 && locationMatches > 0) {
-        reasons.push(`the listing text lines up with ${location}`);
-      }
-    }
-
-    if (intent.constraints?.rv === true) {
-      if (/\brv\b/.test(descriptionCorpus)) {
-        reasons.push('RV access is mentioned in the provider details');
-      }
-    }
-
-    if (intent.constraints?.dogFriendly === true) {
-      if (descriptionCorpus.includes('dog')) {
-        reasons.push('dog-friendly access is called out in the description or tags');
-      }
-    }
-
-    if (intent.constraints?.tent === true) {
-      if (descriptionCorpus.includes('tent')) {
-        reasons.push('tent camping is explicitly mentioned');
-      }
-    }
-
-    if (intent.constraints?.waterfront === true) {
-      if (/water|lake|river|ocean|coast|beach/.test(descriptionCorpus)) {
-        reasons.push('the description references water access or a waterfront setting');
-      }
-    }
-
-    const priorities = Array.isArray(intent.priorities) ? intent.priorities : [];
-    priorities.forEach(priority => {
-      const token = String(priority || '').toLowerCase().trim();
-      if (token && descriptionCorpus.includes(token) && reasons.length < 4) {
-        reasons.push(`it mentions ${priority}`);
-      }
-    });
-
-    return [...new Set(reasons)].slice(0, 4);
+    return Object.entries(camp.features || {})
+      .filter(([key, value]) => value === true && lastIntent?.constraints?.[key] === true)
+      .map(([key]) => ({ rv: 'RV sites are listed', tent: 'tent sites are listed', dogFriendly: 'dogs are allowed', waterfront: 'waterfront is verified' }[key]))
+      .filter(Boolean);
   }
 
   function buildDetailNarrative(camp) {
-    const rating = Number(camp?.rating);
-    const reviews = Number(camp?.reviews);
+    const rating = knownNumber(camp?.rating);
+    const reviews = knownNumber(camp?.reviews);
     const descriptionText = String(camp?.descriptionText || '').trim();
     const reviewSummary = camp?.googleReviewSummary || {};
     const reviewHighlights = Array.isArray(reviewSummary.highlights) ? reviewSummary.highlights.filter(Boolean) : [];
@@ -310,7 +261,7 @@ let pendingAssistantMessageId = null;
     }).filter(tag => !/^\d+\s+campsites$/i.test(tag));
     const reviewSentence = reviewHighlights.length > 0
       ? `Recent reviews mention ${reviewHighlights.join('; ')}.`
-      : (Number.isFinite(Number(reviewSummary.rating)) && Number.isFinite(Number(reviewSummary.userRatingsTotal))
+      : (knownNumber(reviewSummary.rating) !== null && knownNumber(reviewSummary.userRatingsTotal) !== null
         ? `Google shows a ${Number(reviewSummary.rating).toFixed(1)} rating from ${Math.round(Number(reviewSummary.userRatingsTotal))} reviews.`
         : (Number.isFinite(rating) && Number.isFinite(reviews)
           ? `It is rated ${rating.toFixed(2)} from ${Math.round(reviews)} reviews.`
@@ -321,10 +272,10 @@ let pendingAssistantMessageId = null;
       ? `It matches your request because ${matchReasons.join('; ')}.`
       : (overviewTags.length > 0
         ? `It stands out for ${overviewTags.slice(0, 3).join(', ')}.`
-        : 'It offers live availability and provider-backed details.');
+        : 'This is a provider campground listing. Confirm site-specific amenities with the provider.');
 
     return {
-      summary: `${whySentence} ${reviewSentence}`.replace(/\s+/g, ' ').trim(),
+      summary: `${camp.isDemo ? 'Demo listing. ' : ''}${whySentence} ${reviewSentence}${camp.missingRequirements?.length ? ` Unverified or unmet requirements: ${camp.missingRequirements.join('; ')}.` : ''}`.replace(/\s+/g, ' ').trim(),
       description: descriptionText || ''
     };
   }
@@ -398,6 +349,19 @@ let pendingAssistantMessageId = null;
 
     const filledInput = inputs.find(input => String(input.value || '').trim());
     return filledInput ? String(filledInput.value || '').trim() : '';
+  }
+
+  function focusSearchComposer() {
+    const inputs = getSearchInputs();
+    if (!inputs.length) {
+      return;
+    }
+
+    const target = document.getElementById('view-results')?.classList.contains('active')
+      ? (inputs.find(input => input.id === 'results-search-input') || inputs[0])
+      : (inputs.find(input => input.id === 'main-search') || inputs[0]);
+    target.focus();
+    autoResizeSearchInput(target);
   }
 
   function normalizePillLabel(rawLabel = '') {
@@ -526,10 +490,9 @@ let pendingAssistantMessageId = null;
     }
 
     const topNames = results.slice(0, 3).map(card => card.name).join(', ');
-    const countText = results.length === 1 ? 'I found 1 live match.' : `I found ${results.length} live matches.`;
-    const modeText = inventorySourceText.includes('Closest intent matches')
-      ? ' These are the closest live matches.'
-      : (intent && intent.enabled ? ' These align with your ideal campsite.' : ' These are the best live matches from the provider search.');
+    const exact = results.filter(card => card.matchGroup === 'exact').length;
+    const countText = results.some(card => card.isDemo) ? `Showing ${results.length} demo listings, not live inventory.` : `I found ${results.length} campground listings.`;
+    const modeText = ` ${exact} satisfy the verified campground requirements; alternatives list unmet or unverified requirements. Availability does not confirm site-specific suitability.`;
 
     return `${countText}${modeText}${topNames ? ` Top results: ${topNames}.` : ''}`;
   }
@@ -571,7 +534,7 @@ let pendingAssistantMessageId = null;
   }
 
   function getRequiredClarificationQuestions(intent, queryText) {
-    if (!intent || intent.enabled !== true) {
+    if (!intent || intent.source !== 'foundry') {
       return [];
     }
 
@@ -612,12 +575,31 @@ let pendingAssistantMessageId = null;
   }
 
   async function runSearch(queryOverride) {
+    const rawQuery = String(queryOverride || getSearchQuery() || '').trim();
+    if (!rawQuery) {
+      // An empty composer previously returned silently, which made the Send
+      // button look broken (no view change, no message, no requests). Give the
+      // user visible feedback and put focus back in the composer.
+      pushChatMessage('assistant', 'Tell me what you are looking for first, for example "tent campground near Seattle for 2 guests".', { tone: 'warning' });
+      focusSearchComposer();
+      return;
+    }
+    const session = searchSessions.start();
     await loadAppConfig();
+    if (!session.isCurrent()) return;
 
-    const rawQuery = String(queryOverride || getSearchQuery() || 'Quiet lakeside, dog-friendly, near Seattle').trim();
+    const stayFromQuery = stayFromQueryText(rawQuery);
+    if (stayFromQuery) setTripDates(stayFromQuery, false);
+    const tripError = validateTrip(trip);
+    if (tripError) {
+      pushChatMessage('assistant', tripError, { tone: 'warning' });
+      return;
+    }
     const q = pendingClarification
       ? `${pendingClarification.baseQuery}. Additional user details: ${rawQuery}`
-      : rawQuery;
+      : (lastSearchQuery ? `${lastSearchQuery}. Updated request: ${rawQuery}` : rawQuery);
+    lastSearchQuery = q.slice(-1900);
+    searchError = '';
 
     syncSearchInputs('');
     pushChatMessage('user', rawQuery);
@@ -627,7 +609,9 @@ let pendingAssistantMessageId = null;
     renderResultsGrid();
 
     try {
-      lastIntent = await fetchIntentParse(q);
+      const parsedIntent = await fetchIntentParse(lastSearchQuery, session.signal);
+      if (!session.isCurrent()) return;
+      lastIntent = parsedIntent;
       const clarificationQuestions = getRequiredClarificationQuestions(lastIntent, q);
 
       if (clarificationQuestions.length > 0) {
@@ -649,7 +633,11 @@ let pendingAssistantMessageId = null;
       setLoadingState(true, sourceStatusText);
       renderResultsGrid();
 
-      const live = await fetchLiveInventory(q, lastIntent);
+      const outcome = await fetchLiveInventory(lastSearchQuery, lastIntent, { ...trip }, session.signal);
+      if (!session.isCurrent()) return;
+      const live = outcome.cards;
+      inventorySourceText = outcome.source;
+      searchOrigin = outcome.origin;
       if (live.length > 0) {
         campsites = live;
       } else {
@@ -666,7 +654,8 @@ let pendingAssistantMessageId = null;
       }
       resolvePendingAssistantMessage(buildSearchResultMessage(q, campsites, lastIntent), campsites.length ? 'default' : 'warning');
     } catch (err) {
-      console.error('Live inventory search failed:', err);
+      if (!session.isCurrent()) return;
+      searchError = 'Search could not reach the providers. Retry, or check your server configuration.';
       if (APP_CONFIG.demoMode) {
         campsites = [...mockCampsites];
         inventorySourceText = 'Demo mode inventory (live fetch failed)';
@@ -680,6 +669,41 @@ let pendingAssistantMessageId = null;
 
     setLoadingState(false);
     renderResultsGrid();
+  }
+
+  function setTripDates(value, cancelSearch = true) {
+    if (cancelSearch) searchSessions.cancel();
+    detailSessions.cancel();
+    trip = { checkIn: value.checkIn || null, checkOut: value.checkOut || null };
+    for (const prefix of ['trip', 'results-trip', '']) {
+      const checkIn = document.getElementById(prefix ? `${prefix}-checkin` : 'checkin-date');
+      const checkOut = document.getElementById(prefix ? `${prefix}-checkout` : 'checkout-date');
+      if (checkIn) checkIn.value = trip.checkIn || '';
+      if (checkOut) checkOut.value = trip.checkOut || '';
+    }
+    if (currentCamp) {
+      currentCamp = { ...currentCamp, availability: { state: 'not_checked', count: null, checkedAt: null }, availabilityTrip: null };
+      renderDetailListingFields(currentCamp);
+      renderDetailBookingCta(currentCamp);
+      renderDetailPricing(currentCamp);
+    }
+    campsites = campsites.map(camp => ({ ...camp, availability: { state: 'not_checked', count: null, checkedAt: null }, availabilityTrip: null }));
+    if (isLoadingResults) {
+      setLoadingState(false);
+      resolvePendingAssistantMessage('Dates changed. Send your request again to check the updated stay.', 'warning');
+    }
+    renderResultsGrid();
+  }
+
+  function retrySearch() {
+    const query = lastSearchQuery;
+    lastSearchQuery = '';
+    pendingClarification = null;
+    runSearch(query);
+  }
+
+  function backFromDetail() {
+    showView(detailOrigin);
   }
 
   function goToCheckout() { openCampBooking(currentCamp); }
@@ -699,6 +723,8 @@ let pendingAssistantMessageId = null;
       exploreInput?.focus();
       return;
     }
+    lastSearchQuery = '';
+    pendingClarification = null;
     showView('results');
     runSearch(query);
   }
@@ -741,15 +767,6 @@ let pendingAssistantMessageId = null;
     return APP_CONFIG;
   }
 
-  function toIsoMonthStart(date = new Date()) {
-    const monthStart = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
-    return monthStart.toISOString();
-  }
-
-  function isValidIsoDate(value) {
-    return /^\d{4}-\d{2}-\d{2}$/.test(String(value || '').trim());
-  }
-
   function appendSearchParams(rawUrl, params) {
     if (!rawUrl) {
       return '';
@@ -769,12 +786,8 @@ let pendingAssistantMessageId = null;
   }
 
   function getBookingWindow() {
-    const checkInValue = document.getElementById('checkin-date')?.value || '';
-    const checkOutValue = document.getElementById('checkout-date')?.value || '';
-
     return {
-      checkIn: isValidIsoDate(checkInValue) ? checkInValue : null,
-      checkOut: isValidIsoDate(checkOutValue) ? checkOutValue : null,
+      ...trip,
       adults: Number.isFinite(Number(guestCount)) && Number(guestCount) > 0 ? Number(guestCount) : null
     };
   }
@@ -811,10 +824,10 @@ let pendingAssistantMessageId = null;
       };
     }
 
-    if (camp.bookingUrl) {
+    if (safeHttpUrl(camp.bookingUrl)) {
       return {
         providerLabel: camp.sourceProvider === 'nps' ? 'NPS reservation partner' : 'Campground provider',
-        url: appendSearchParams(camp.bookingUrl, {
+        url: appendSearchParams(safeHttpUrl(camp.bookingUrl), {
           checkin: bookingWindow?.checkIn || null,
           checkout: bookingWindow?.checkOut || null,
           adults: bookingWindow?.adults || null
@@ -843,21 +856,22 @@ let pendingAssistantMessageId = null;
 
     const target = buildCampBookingTarget(camp, getBookingWindow());
     button.textContent = target.ctaLabel;
+    button.disabled = !camp || camp.isDemo || Boolean(validateTrip(trip));
     note.textContent = target.url
-      ? `You will be redirected to ${target.providerLabel} to complete booking.`
+      ? (validateTrip(trip) || (camp?.isDemo ? 'Demo listings cannot be booked.' : `You will be redirected to ${target.providerLabel}. Confirm prices, fees, availability, and site suitability there.`))
       : 'Booking link unavailable. Try another campsite or run a new search.';
   }
 
   function getNightCountFromInputs() {
-    const checkIn = document.getElementById('checkin-date')?.value || '';
-    const checkOut = document.getElementById('checkout-date')?.value || '';
+    const checkIn = trip.checkIn;
+    const checkOut = trip.checkOut;
 
     if (!isValidIsoDate(checkIn) || !isValidIsoDate(checkOut)) {
       return 1;
     }
 
-    const start = new Date(`${checkIn}T00:00:00`);
-    const end = new Date(`${checkOut}T00:00:00`);
+    const start = new Date(`${checkIn}T00:00:00Z`);
+    const end = new Date(`${checkOut}T00:00:00Z`);
     const diffMs = end.getTime() - start.getTime();
     const diffDays = Math.round(diffMs / (24 * 60 * 60 * 1000));
     return Math.max(1, diffDays);
@@ -875,35 +889,36 @@ let pendingAssistantMessageId = null;
     const totalValueEl = document.getElementById('d-price-total-value');
 
     if (bookingPriceEl) {
-      bookingPriceEl.innerHTML = breakdown.nightly > 0
-        ? `$${breakdown.nightly} <span class="per">/ night</span>`
+      bookingPriceEl.innerHTML = breakdown.nightly !== null
+        ? `From $${breakdown.nightly} <span class="per">/ night, provider-listed rate</span>`
         : 'Price unavailable';
     }
 
     if (nightsLabelEl) {
-      nightsLabelEl.textContent = breakdown.nightly > 0
+      nightsLabelEl.textContent = breakdown.nightly !== null
         ? `$${breakdown.nightly} × ${breakdown.nights} ${breakdown.nights === 1 ? 'night' : 'nights'}`
         : `Unavailable nightly rate × ${breakdown.nights} ${breakdown.nights === 1 ? 'night' : 'nights'}`;
     }
 
     if (nightsValueEl) {
-      nightsValueEl.textContent = `$${breakdown.nightsSubtotal}`;
+      nightsValueEl.textContent = breakdown.nightsSubtotal === null ? 'Unavailable' : `$${breakdown.nightsSubtotal}`;
     }
 
     if (feeLabelEl) {
-      feeLabelEl.textContent = breakdown.guestExtraFee > 0 ? `Park fee + guest fee (${breakdown.guests} guests)` : 'Park fee';
+      feeLabelEl.textContent = 'Fees and taxes';
     }
 
     if (feeValueEl) {
-      feeValueEl.textContent = `$${breakdown.parkFee}`;
+      feeValueEl.textContent = 'Confirm with provider';
     }
 
     if (totalValueEl) {
-      totalValueEl.textContent = `$${breakdown.total}`;
+      totalValueEl.textContent = breakdown.total === null ? 'Unavailable' : `$${breakdown.total} estimate, excluding fees`;
     }
   }
 
   function openCampBooking(camp = currentCamp) {
+    if (!camp || camp.isDemo || validateTrip(trip)) return;
     const target = buildCampBookingTarget(camp, getBookingWindow());
     if (!target.url) {
       renderDetailBookingCta(camp);
@@ -969,7 +984,7 @@ let pendingAssistantMessageId = null;
     return [...new Set([...enriched, ...base])];
   }
 
-  async function fetchIntentParse(queryText) {
+  async function fetchIntentParse(queryText, signal) {
     const dateFilter = document.getElementById('date-filter');
     const guestFilter = document.getElementById('guest-filter');
     const activePills = Array.from(document.querySelectorAll('.filter-pill.active'))
@@ -978,40 +993,27 @@ let pendingAssistantMessageId = null;
       .slice(0, 3);
 
     const payload = {
-      query: String(queryText || '').slice(0, 220),
+      query: String(queryText || '').slice(0, 1900),
       context: {
         dateSelection: dateFilter ? String(dateFilter.value || '').slice(0, 20) : '',
-        guestSelection: guestFilter ? String(guestFilter.value || '').slice(0, 20) : '',
+        guestSelection: `${guestCount} guests`,
         activePills
       }
     };
 
     try {
-      const res = await apiClient.parseIntent(payload);
+      const res = await apiClient.parseIntent(payload, { signal });
 
       if (!res.ok) {
-        return null;
+        return fallbackIntent(queryText, payload.context);
       }
 
       const data = await res.json();
-      return data?.intent || null;
+      return data?.intent?.enabled ? data.intent : fallbackIntent(queryText, payload.context);
     } catch (err) {
-      return null;
+      if (signal?.aborted) throw err;
+      return fallbackIntent(queryText, payload.context);
     }
-  }
-
-  function computeAvailableSites(availabilityPayload) {
-    const campsitesMap = availabilityPayload?.campsites || {};
-    let availableCount = 0;
-
-    Object.values(campsitesMap).forEach(site => {
-      const days = Object.values(site?.availabilities || {});
-      if (days.some(day => day === 'Available')) {
-        availableCount += 1;
-      }
-    });
-
-    return availableCount;
   }
 
   function normalizeImageUrl(url) {
@@ -1032,32 +1034,6 @@ let pendingAssistantMessageId = null;
     const isHex = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(raw);
     const isRgb = /^rgba?\(\s*\d{1,3}(\s*,\s*\d{1,3}){2}(\s*,\s*(0|1|0?\.\d+))?\s*\)$/.test(raw);
     return (isHex || isRgb) ? raw : '#F5F3EE';
-  }
-
-  function pickRidbImageUrl(facility) {
-    const media = Array.isArray(facility?.MEDIA) ? facility.MEDIA : [];
-    const image = media.find(m => String(m?.MediaType || '').toLowerCase() === 'image') || media[0];
-    return normalizeImageUrl(image?.URL);
-  }
-
-  function pickRidbImageUrls(facility) {
-    const media = Array.isArray(facility?.MEDIA) ? facility.MEDIA : [];
-    return [...new Set(
-      media
-        .filter(item => String(item?.MediaType || '').toLowerCase() === 'image' || item?.URL)
-        .map(item => normalizeImageUrl(item?.URL))
-        .filter(Boolean)
-    )];
-  }
-
-  function pickNpsImageUrl(campground) {
-    const images = Array.isArray(campground?.images) ? campground.images : [];
-    return normalizeImageUrl(images[0]?.url);
-  }
-
-  function pickNpsImageUrls(campground) {
-    const images = Array.isArray(campground?.images) ? campground.images : [];
-    return [...new Set(images.map(item => normalizeImageUrl(item?.url)).filter(Boolean))];
   }
 
   function isUnknownLocation(loc) {
@@ -1131,50 +1107,13 @@ let pendingAssistantMessageId = null;
     return '';
   }
 
-  function deriveLocationFromName(name) {
-    const text = String(name || '').trim();
-    if (!text) {
-      return '';
-    }
-
-    const parenMatch = text.match(/\(([^)]+)\)/);
-    if (parenMatch && parenMatch[1]) {
-      return parenMatch[1].trim();
-    }
-
-    const hyphenParts = text.split(' - ');
-    if (hyphenParts.length > 1) {
-      return hyphenParts[hyphenParts.length - 1].trim();
-    }
-
-    const regionKeywords = ['river', 'lake', 'forest', 'bay', 'creek', 'canyon', 'peninsula'];
-    const tokens = text.split(/\s+/);
-    const keywordIndex = tokens.findIndex(token => regionKeywords.includes(token.toLowerCase()));
-    if (keywordIndex > 0) {
-      const start = Math.max(0, keywordIndex - 1);
-      return tokens.slice(start, keywordIndex + 1).join(' ');
-    }
-
-    return '';
-  }
-
   function normalizeCardLocation(camp, intent) {
     const existing = String(camp.loc || '').trim();
     if (!isUnknownLocation(existing)) {
       return existing;
     }
 
-    const fromName = deriveLocationFromName(camp.name);
-    if (fromName) {
-      return fromName.includes(',') ? fromName : `${fromName}, US`;
-    }
-
-    const fromIntent = String(intent?.location || '').trim();
-    if (fromIntent) {
-      return fromIntent.includes(',') ? fromIntent : `${fromIntent}, US`;
-    }
-
-    return 'United States';
+    return 'Location unavailable';
   }
 
   async function hydrateCardLocationLabels(cards) {
@@ -1226,247 +1165,107 @@ let pendingAssistantMessageId = null;
   }
 
   function getCardMatchPercent(card) {
-    const intentScore = Number(card?.intentScore);
-    const aiScore = Number(card?.ai_score);
-
-    const rawScore = Number.isFinite(aiScore) && aiScore > 0
-      ? aiScore
-      : (Number.isFinite(intentScore) ? intentScore : NaN);
-
-    if (!Number.isFinite(rawScore)) {
-      return null;
-    }
-
-    return Math.max(1, Math.min(100, Math.round(rawScore)));
-  }
-
-  function sortCardsByMatchPercent(cards) {
-    const rows = Array.isArray(cards) ? cards.slice() : [];
-    return rows.sort((a, b) => {
-      const matchA = getCardMatchPercent(a);
-      const matchB = getCardMatchPercent(b);
-      const normalizedA = Number.isFinite(Number(matchA)) ? Number(matchA) : -1;
-      const normalizedB = Number.isFinite(Number(matchB)) ? Number(matchB) : -1;
-
-      if (normalizedB !== normalizedA) {
-        return normalizedB - normalizedA;
-      }
-
-      return (Number(b?.ai_score) || 0) - (Number(a?.ai_score) || 0);
-    });
-  }
-
-  function tokenizeText(value) {
-    return String(value || '')
-      .toLowerCase()
-      .replace(/[^a-z0-9\s]/g, ' ')
-      .split(/\s+/)
-      .filter(token => token.length >= 3);
+    // Ranking scores are not calibrated probabilities.
+    return null;
   }
 
   const PROVIDER_SCHEMA_VERSION = 'campin.provider-campground.v1';
 
-  function normalizeProviderId(value, fallbackPrefix = 'unknown') {
-    const id = String(value || '').trim();
-    return id || `${fallbackPrefix}-${Math.random().toString(36).slice(2, 10)}`;
-  }
-
   function normalizeRidbFacilityRecord(facility) {
-    const mediaRows = Array.isArray(facility?.MEDIA) ? facility.MEDIA : [];
-    const mediaUrls = [...new Set(
-      mediaRows
-        .filter(item => String(item?.MediaType || '').toLowerCase() === 'image' || item?.URL)
-        .map(item => normalizeImageUrl(item?.URL))
-        .filter(Boolean)
-    )];
-
-    return {
-      schemaVersion: PROVIDER_SCHEMA_VERSION,
-      sourceProvider: 'recreation_gov',
-      providerId: normalizeProviderId(facility?.FacilityID, 'ridb'),
-      name: String(facility?.FacilityName || '').trim(),
-      typeDescription: String(facility?.FacilityTypeDescription || 'Federal').trim(),
-      city: String(facility?.FacilityCity || '').trim(),
-      stateCode: String(facility?.FacilityStateCode || facility?.FacilityState || 'US').trim() || 'US',
-      lat: Number.isFinite(Number(facility?.FacilityLatitude)) ? Number(facility.FacilityLatitude) : null,
-      lon: Number.isFinite(Number(facility?.FacilityLongitude)) ? Number(facility.FacilityLongitude) : null,
-      description: String(facility?.FacilityDescription || '').trim(),
-      feeDescription: String(facility?.FacilityUseFeeDescription || '').trim(),
-      directions: String(facility?.FacilityDirections || '').trim(),
-      mediaUrls
-    };
+    return normalizeRidb(facility);
   }
 
   function normalizeNpsCampgroundRecord(campground) {
-    const addr = campground?.addresses?.find(a => a.type === 'Physical') || campground?.addresses?.[0] || {};
-    const npsLatLon = String(campground?.latLong || '').trim();
-    const npsLatMatch = npsLatLon.match(/lat:([\d.\-]+)/);
-    const npsLonMatch = npsLatLon.match(/long:([\d.\-]+)/);
-    const images = Array.isArray(campground?.images) ? campground.images : [];
-    const mediaUrls = [...new Set(images.map(item => normalizeImageUrl(item?.url)).filter(Boolean))];
-
-    return {
-      schemaVersion: PROVIDER_SCHEMA_VERSION,
-      sourceProvider: 'nps',
-      providerId: normalizeProviderId(campground?.id, 'nps'),
-      name: String(campground?.name || '').trim(),
-      typeDescription: 'National Park Service · Campground',
-      city: String(addr?.city || 'National Park').trim() || 'National Park',
-      stateCode: String(addr?.stateCode || 'US').trim() || 'US',
-      lat: npsLatMatch ? Number(npsLatMatch[1]) : null,
-      lon: npsLonMatch ? Number(npsLonMatch[1]) : null,
-      description: buildProviderDescription(campground, [
-        'description',
-        'shortDescription',
-        'overview',
-        'bodyText',
-        'text'
-      ]),
-      directions: String(campground?.directions || campground?.directionsInfo || '').trim(),
-      reservationUrl: String(campground?.reservationUrl || campground?.reservationsUrl || '').trim(),
-      mediaUrls
-    };
+    return normalizeNps(campground);
   }
 
-  async function fetchRidbFacilities(query, intent) {
-    const candidates = buildQueryCandidatesFromIntent(query, intent);
+  const RIDB_FETCH_TARGET = 12;
+  const MAX_RIDB_REQUESTS_PER_SEARCH = 5;
+
+  function buildConstraintAwareQuery(intent) {
+    const parts = [];
+    if (intent?.location) parts.push(intent.location);
+    const constraints = intent?.constraints || {};
+    if (constraints.tent) parts.push('tent');
+    if (constraints.rv) parts.push('RV');
+    if (constraints.waterfront) parts.push('lake');
+    if (constraints.dogFriendly) parts.push('pet');
+    parts.push('campground');
+    return parts.join(' ').trim();
+  }
+
+  function collectRidbRows(rows, seen, combined) {
+    let added = 0;
+    (Array.isArray(rows) ? rows : []).forEach(row => {
+      if (!/campground/i.test(row.FacilityTypeDescription || '') &&
+          !/camping/i.test(JSON.stringify(row.ACTIVITY || []))) return;
+      const normalized = normalizeRidbFacilityRecord(row);
+      const key = normalized.providerId;
+      if (!seen.has(key)) {
+        seen.add(key);
+        combined.push(normalized);
+        added += 1;
+      }
+    });
+    return added;
+  }
+
+  async function fetchRidbRows(query, limit, signal, origin, radiusKm) {
+    const res = await apiClient.getRidbFacilities(query, limit, { signal }, origin ? { ...origin, radiusKm } : null);
+    if (!res.ok) {
+      throw new Error('RIDB request failed.');
+    }
+    const data = await res.json();
+    return Array.isArray(data?.RECDATA) ? data.RECDATA : [];
+  }
+
+  async function fetchRidbFacilities(query, intent, signal, origin) {
+    const textCandidates = buildQueryCandidatesFromIntent(query, intent);
+    // With an origin, combine a geo search with keyword searches so the provider sees
+    // both "where" and "what"; without one, fall back to text candidates only.
+    const candidates = origin
+      ? [
+          { geo: true, query: '' },
+          { geo: false, query: buildConstraintAwareQuery(intent) },
+          ...textCandidates.slice(0, 1).map(candidate => ({ geo: false, query: candidate }))
+        ].slice(0, 3)
+      : textCandidates.slice(0, 3).map(candidate => ({ geo: false, query: candidate }));
     const seen = new Set();
     const combined = [];
+    let radiusKm = RADIUS_SCHEDULE_KM[0];
+    let requests = 0;
 
     for (const candidate of candidates) {
-      const res = await apiClient.getRidbFacilities(candidate, 12);
-      if (!res.ok) {
-        continue;
-      }
-
-      const data = await res.json();
-      const rows = data?.RECDATA || [];
-      rows.forEach(row => {
-        const normalized = normalizeRidbFacilityRecord(row);
-        const key = normalized.providerId;
-        if (!seen.has(key)) {
-          seen.add(key);
-          combined.push(normalized);
+      if (requests >= MAX_RIDB_REQUESTS_PER_SEARCH || combined.length >= RIDB_FETCH_TARGET) break;
+      if (candidate.geo) {
+        // Expand the radius when the area is thin until we have enough rows.
+        for (const step of RADIUS_SCHEDULE_KM) {
+          if (requests >= MAX_RIDB_REQUESTS_PER_SEARCH || combined.length >= RIDB_FETCH_TARGET) break;
+          requests += 1;
+          const rows = await fetchRidbRows(candidate.query, 12, signal, origin, step);
+          if (collectRidbRows(rows, seen, combined) > 0) radiusKm = step;
         }
-      });
-
-      // Stop once we have enough RIDB records for UI rendering.
-      if (combined.length >= 8) {
-        break;
+      } else {
+        requests += 1;
+        const rows = await fetchRidbRows(candidate.query, 12, signal, null, null);
+        collectRidbRows(rows, seen, combined);
       }
     }
 
-    return combined;
-  }
-
-  function toBooleanFlag(value) {
-    if (typeof value === 'boolean') {
-      return value;
-    }
-
-    const normalized = String(value || '').trim().toLowerCase();
-    return normalized === 'true' || normalized === '1' || normalized === 'y' || normalized === 'yes';
-  }
-
-  function extractPriceFromCampsite(campsite) {
-    const directKeys = [
-      'CampsiteCost',
-      'CampsiteFee',
-      'Cost',
-      'Fee',
-      'Price',
-      'NightlyFee',
-      'MinCost',
-      'CampsiteMinCost'
-    ];
-
-    for (const key of directKeys) {
-      const raw = Number(campsite?.[key]);
-      if (Number.isFinite(raw) && raw > 0) {
-        return raw;
-      }
-    }
-
-    const textBuckets = [
-      campsite?.CampsiteUseFee,
-      campsite?.CampsiteCostText,
-      campsite?.CampsiteDescription,
-      campsite?.CampsiteType
-    ].map(value => String(value || ''));
-
-    for (const text of textBuckets) {
-      const match = text.match(/\$\s*(\d+(?:\.\d{1,2})?)/);
-      if (match && Number.isFinite(Number(match[1]))) {
-        return Number(match[1]);
-      }
-    }
-
-    return null;
+    return { records: combined, radiusKm: origin ? radiusKm : null };
   }
 
   function summarizeRidbCampsites(campsites) {
-    const rows = Array.isArray(campsites) ? campsites : [];
-    if (rows.length === 0) {
-      return {
-        count: 0,
-        avgPrice: null,
-        maxOccupancy: null,
-        rvAllowed: false,
-        tentAllowed: false,
-        electricHookup: false,
-        accessible: false
-      };
-    }
-
-    const prices = [];
-    let maxOccupancy = null;
-    let rvAllowed = false;
-    let tentAllowed = false;
-    let electricHookup = false;
-    let accessible = false;
-
-    rows.forEach(campsite => {
-      const price = extractPriceFromCampsite(campsite);
-      if (Number.isFinite(price) && price > 0) {
-        prices.push(price);
-      }
-
-      const occupancyCandidates = [
-        Number(campsite?.CampsiteMaxOccupancy),
-        Number(campsite?.MaxNumPeople),
-        Number(campsite?.CapacityRating)
-      ].filter(value => Number.isFinite(value) && value > 0);
-
-      if (occupancyCandidates.length > 0) {
-        const localMax = Math.max(...occupancyCandidates);
-        maxOccupancy = Number.isFinite(maxOccupancy) ? Math.max(maxOccupancy, localMax) : localMax;
-      }
-
-      const campsiteType = String(campsite?.CampsiteType || '').toLowerCase();
-      rvAllowed = rvAllowed || toBooleanFlag(campsite?.CampsiteRVAllowed) || toBooleanFlag(campsite?.RVAllowed) || campsiteType.includes('rv');
-      tentAllowed = tentAllowed || toBooleanFlag(campsite?.CampsiteTentAllowed) || toBooleanFlag(campsite?.TentAllowed) || campsiteType.includes('tent');
-      electricHookup = electricHookup || toBooleanFlag(campsite?.CampsiteElectricalHookup) || toBooleanFlag(campsite?.ElectricalHookups) || /electric|hookup/.test(campsiteType);
-      accessible = accessible || toBooleanFlag(campsite?.CampsiteAccessible) || toBooleanFlag(campsite?.Accessible);
-    });
-
-    return {
-      count: rows.length,
-      avgPrice: prices.length ? Number((prices.reduce((sum, value) => sum + value, 0) / prices.length).toFixed(0)) : null,
-      maxOccupancy,
-      rvAllowed,
-      tentAllowed,
-      electricHookup,
-      accessible
-    };
+    return summarizeSites(Array.isArray(campsites) ? campsites : []);
   }
 
-  async function fetchRidbCampsiteSummary(facilityId) {
+  async function fetchRidbCampsiteSummary(facilityId, signal) {
     const id = String(facilityId || '').trim();
     if (!id) {
       return summarizeRidbCampsites([]);
     }
 
-    const res = await apiClient.getRidbCampsites(id, 200, 0);
+    const res = await apiClient.getRidbCampsites(id, 200, 0, { signal });
     if (!res.ok) {
       return summarizeRidbCampsites([]);
     }
@@ -1476,8 +1275,58 @@ let pendingAssistantMessageId = null;
     return summarizeRidbCampsites(rows);
   }
 
-  async function fetchNpsCampgrounds(query) {
-    const res = await apiClient.getNpsCampgrounds(query, 12);
+  function applyCampsiteSummary(card, summary) {
+    if (!summary || typeof summary !== 'object' || card.isDemo) return card;
+    const tags = [...(Array.isArray(card.tags) ? card.tags : [])];
+    if (summary.tentAllowed) tags.push('Tent-friendly');
+    if (summary.rvAllowed) tags.push('RV-friendly');
+    if (summary.electricHookup) tags.push('Electric hookups');
+    if (Number.isFinite(summary.maxOccupancy) && summary.maxOccupancy > 0) tags.push(`Up to ${summary.maxOccupancy} guests`);
+    return {
+      ...card,
+      price: knownNumber(summary.avgPrice) ?? card.price,
+      features: {
+        ...card.features,
+        tent: summary.tentAllowed ?? (card.features ? card.features.tent : null),
+        rv: summary.rvAllowed ?? (card.features ? card.features.rv : null)
+      },
+      campsiteSummary: summary,
+      tags: [...new Set(tags)].slice(0, 7)
+    };
+  }
+
+  // Fill price/tent/RV/capacity details for displayed Explore cards using provider
+  // campsite data. Bounded concurrency, cached per facility so region re-renders do not
+  // refetch, and failures leave the card honestly unverified.
+  async function enrichExploreCards(cards) {
+    const targets = cards.filter(card =>
+      !card.isDemo && card.sourceProvider === 'recreation_gov' && String(card.recreationCampgroundId || '').trim());
+    if (!targets.length) return cards;
+    const queue = [...targets];
+    const summaries = new Map();
+    const workers = Array.from({ length: Math.min(6, targets.length) }, async () => {
+      while (queue.length) {
+        const card = queue.shift();
+        const facilityId = String(card.recreationCampgroundId).trim();
+        if (exploreCampsiteSummaryCache.has(facilityId)) {
+          summaries.set(card.id, exploreCampsiteSummaryCache.get(facilityId));
+          continue;
+        }
+        try {
+          const summary = await fetchRidbCampsiteSummary(facilityId);
+          exploreCampsiteSummaryCache.set(facilityId, summary);
+          summaries.set(card.id, summary);
+        } catch {
+          // Leave this card unverified rather than guessing.
+        }
+      }
+    });
+    await Promise.all(workers);
+    return cards.map(card => summaries.has(card.id) ? applyCampsiteSummary(card, summaries.get(card.id)) : card);
+  }
+
+  async function fetchNpsCampgrounds(query, signal) {
+    const res = await apiClient.getNpsCampgrounds(query, 12, { signal });
     if (!res.ok) {
       throw new Error(`NPS request failed (${res.status})`);
     }
@@ -1487,17 +1336,29 @@ let pendingAssistantMessageId = null;
     return rows.map(normalizeNpsCampgroundRecord);
   }
 
-  async function fetchRecreationAvailability(campgroundId, monthStartIso = toIsoMonthStart()) {
+  async function fetchRecreationAvailability(campgroundId, monthStartIso, signal) {
     if (!campgroundId) {
       return null;
     }
 
-    const res = await apiClient.getRecreationAvailability(campgroundId, monthStartIso);
+    const res = await apiClient.getRecreationAvailability(campgroundId, monthStartIso, { signal });
     if (!res.ok) {
       return null;
     }
 
     return res.json();
+  }
+
+  async function fetchStayAvailability(campgroundId, stay, signal) {
+    const months = tripMonths(stay);
+    if (!campgroundId || !months.length) return summarizeAvailability([], stay);
+    const payloads = await Promise.all(months.map(month =>
+      fetchRecreationAvailability(campgroundId, month, signal).catch(error => {
+        if (signal?.aborted) throw error;
+        return null;
+      })
+    ));
+    return summarizeAvailability(payloads, stay);
   }
 
   async function fetchRidbExploreBatch(query, limit = 6) {
@@ -1522,7 +1383,7 @@ let pendingAssistantMessageId = null;
     return rows.map(normalizeNpsCampgroundRecord);
   }
 
-  function mapRidbToCampCard(facility, index, availableSites, campsiteSummary = null) {
+  function mapRidbToCampCard(facility, index, availability = null, campsiteSummary = null) {
     const normalized = facility?.schemaVersion === PROVIDER_SCHEMA_VERSION
       ? facility
       : normalizeRidbFacilityRecord(facility);
@@ -1541,7 +1402,7 @@ let pendingAssistantMessageId = null;
       descriptionText,
       facilityText: [normalized.description, normalized.feeDescription, normalized.directions].filter(Boolean).join(' '),
       campsiteSummary: summary,
-      baseTags: ['Recreation.gov', 'Federal inventory', 'Live availability']
+      baseTags: ['Recreation.gov', 'Campground listing']
     });
     if (Number.isFinite(summary.maxOccupancy) && summary.maxOccupancy > 0) {
       tags.push(`Up to ${summary.maxOccupancy} guests`);
@@ -1563,9 +1424,7 @@ let pendingAssistantMessageId = null;
       tags.push(`Up to ${summary.maxOccupancy} guests`);
     }
 
-    const price = Number.isFinite(Number(summary.avgPrice)) && Number(summary.avgPrice) > 0
-      ? Number(summary.avgPrice)
-      : (35 + (index * 4));
+    const price = knownNumber(summary.avgPrice);
 
     return {
       id: `ridb-${normalized.providerId}`,
@@ -1582,26 +1441,25 @@ let pendingAssistantMessageId = null;
       lon,
       facilityDirections,
       price,
-      rating: 4.6,
-      reviews: 120 + (index * 17),
+      rating: null,
+      reviews: null,
       emoji: emojis[index % emojis.length],
       bg: cardPalettes[index % cardPalettes.length],
       imageUrl: normalized.mediaUrls[0] || '',
       photoUrls: normalized.mediaUrls,
-      availableSites,
+      availability,
+      features: { rv: summary.rvAllowed, tent: summary.tentAllowed, dogFriendly: null, waterfront: null },
       descriptionText,
       descriptionSource: descriptionText ? 'RIDB facility description' : '',
-      badge: availableSites > 0
-        ? `${availableSites} sites available`
-        : (summary.count > 0 ? `${summary.count} campsites listed` : 'No current availability'),
+      badge: 'Provider listing',
       tags: [...new Set(tags)].slice(0, 7),
       campsiteCount: summary.count,
       campsiteSummary: summary,
-      ai_score: Math.max(65, 98 - index * 4)
+      ai_score: 0
     };
   }
 
-  function mapNpsToCampCard(campground, index, availableSites) {
+  function mapNpsToCampCard(campground, index, availability = null) {
     const normalized = campground?.schemaVersion === PROVIDER_SCHEMA_VERSION
       ? campground
       : normalizeNpsCampgroundRecord(campground);
@@ -1632,17 +1490,21 @@ let pendingAssistantMessageId = null;
       lat: npsLat,
       lon: npsLon,
       facilityDirections: normalized.directions,
-      price: 30 + (index * 5),
-      rating: 4.7,
-      reviews: 85 + (index * 12),
+      price: normalized.price,
+      rating: null,
+      reviews: null,
       emoji: emojis[(index + 2) % emojis.length],
       bg: cardPalettes[(index + 2) % cardPalettes.length],
       imageUrl: normalized.mediaUrls[0] || '',
       photoUrls: normalized.mediaUrls,
-      availableSites,
-      badge: availableSites > 0 ? `${availableSites} sites available` : (recIdFromReservationLink ? 'Inventory check pending' : 'NPS listing'),
+      availability,
+      features: normalized.features,
+      campsiteSummary: normalized.campsiteSummary,
+      descriptionText,
+      descriptionSource: 'NPS campground description',
+      badge: 'Provider listing',
       tags,
-      ai_score: Math.max(60, 90 - index * 3)
+      ai_score: 0
     };
   }
 
@@ -1663,16 +1525,6 @@ let pendingAssistantMessageId = null;
     });
   }
 
-  function hashString(value) {
-    let hash = 0;
-    const text = String(value || '');
-    for (let i = 0; i < text.length; i += 1) {
-      hash = ((hash << 5) - hash) + text.charCodeAt(i);
-      hash |= 0;
-    }
-    return Math.abs(hash);
-  }
-
   function normalizeRegionFromLocation(loc = '', fallbackRegion = 'all') {
     const match = String(loc || '').match(/,\s*([A-Z]{2})\b/);
     const stateCode = match ? match[1].toUpperCase() : '';
@@ -1681,19 +1533,19 @@ let pendingAssistantMessageId = null;
       return fallbackRegion;
     }
 
-    if (regionStates.rockies.includes(stateCode)) {
+    if (REGION_STATES.rockies.includes(stateCode)) {
       return 'rockies';
     }
-    if (regionStates.northeast.includes(stateCode)) {
+    if (REGION_STATES.northeast.includes(stateCode)) {
       return 'northeast';
     }
-    if (regionStates.midwest.includes(stateCode)) {
+    if (REGION_STATES.midwest.includes(stateCode)) {
       return 'midwest';
     }
-    if (regionStates.south.includes(stateCode)) {
+    if (REGION_STATES.south.includes(stateCode)) {
       return 'south';
     }
-    if (regionStates.west.includes(stateCode)) {
+    if (REGION_STATES.west.includes(stateCode)) {
       return 'west';
     }
 
@@ -1701,38 +1553,29 @@ let pendingAssistantMessageId = null;
   }
 
   function enhanceExploreCard(card, rankHint, fallbackRegion) {
-    const seed = hashString(`${card.name}-${card.loc}-${card.type}`);
-    const rating = Math.min(4.99, 4.58 + ((seed % 37) / 100));
-    const reviews = 120 + (seed % 920);
-    const reviewScore = Number((rating * 100 + Math.log10(reviews + 10) * 32 + Math.max(0, 28 - rankHint)).toFixed(2));
     const region = normalizeRegionFromLocation(card.loc, fallbackRegion);
 
     return {
       ...card,
-      rating: Number(rating.toFixed(2)),
-      reviews,
-      ai_score: Math.round(Math.max(card.ai_score || 0, reviewScore)),
-      reviewScore,
       region,
-      tags: [...new Set([...(Array.isArray(card.tags) ? card.tags : []), 'Best reviewed', `Region: ${region.charAt(0).toUpperCase()}${region.slice(1)}`])]
+      tags: [...new Set([...(Array.isArray(card.tags) ? card.tags : []), `Region: ${region.charAt(0).toUpperCase()}${region.slice(1)}`])]
     };
   }
 
   async function fetchExploreCampgrounds() {
-    const plan = exploreQueryPlan.slice(0, 4);
     const batches = await Promise.all(
-      plan.map(async (planItem, planIndex) => {
+      EXPLORE_PLAN.map(async (planItem, planIndex) => {
         const [ridbRows, npsRows] = await Promise.all([
-          fetchRidbExploreBatch(planItem.query, 5).catch(() => []),
-          fetchNpsExploreBatch(planItem.query, 4).catch(() => [])
+          fetchRidbExploreBatch(planItem.query, 8).catch(() => []),
+          fetchNpsExploreBatch(planItem.query, 5).catch(() => [])
         ]);
 
-        const ridbCards = ridbRows.slice(0, 4).map((facility, idx) =>
-          enhanceExploreCard(mapRidbToCampCard(facility, idx + planIndex, 0), idx + 1, planItem.region)
+        const ridbCards = ridbRows.slice(0, 6).map((facility, idx) =>
+          enhanceExploreCard(mapRidbToCampCard(facility, idx + planIndex), idx + 1, planItem.region)
         );
 
-        const npsCards = npsRows.slice(0, 3).map((campground, idx) =>
-          enhanceExploreCard(mapNpsToCampCard(campground, idx + planIndex, 0), idx + 2, planItem.region)
+        const npsCards = npsRows.slice(0, 4).map((campground, idx) =>
+          enhanceExploreCard(mapNpsToCampCard(campground, idx + planIndex), idx + 2, planItem.region)
         );
 
         return [...ridbCards, ...npsCards];
@@ -1753,12 +1596,16 @@ let pendingAssistantMessageId = null;
 
     const labeledCards = await hydrateCardLocationLabels(uniqueCards);
 
-    return labeledCards.sort((a, b) => {
-      if ((b.reviewScore || 0) !== (a.reviewScore || 0)) {
-        return (b.reviewScore || 0) - (a.reviewScore || 0);
-      }
-      return (b.reviews || 0) - (a.reviews || 0);
-    }).slice(0, 18);
+    // Keep coverage across regions rather than slicing only the first region batches.
+    const balanced = [];
+    const regions = Object.keys(REGION_STATES);
+    for (let index = 0; index < 6; index += 1) {
+      regions.forEach(region => {
+        const card = labeledCards.filter(item => item.region === region)[index];
+        if (card) balanced.push(card);
+      });
+    }
+    return enrichExploreCards(balanced.slice(0, 30));
   }
 
   function setExploreStatus(text) {
@@ -1790,48 +1637,16 @@ let pendingAssistantMessageId = null;
       return;
     }
 
-    cards.forEach((c, idx) => {
-      const safeName = escapeHtml(c.name);
-      const safeType = escapeHtml(c.type);
-      const safeLocation = escapeHtml(c.loc);
-      const safeImageUrl = normalizeImageUrl(c.imageUrl);
-      const safeEmoji = escapeHtml(c.renderEmoji);
-      const safeBg = sanitizeBackgroundColor(c.renderBg);
-      const safeRegion = escapeHtml(String(c.region || '').toUpperCase());
-      const safeRating = Number.isFinite(Number(c.rating)) ? Number(c.rating) : 0;
-      const safeReviews = Number.isFinite(Number(c.reviews)) ? Math.round(Number(c.reviews)) : 0;
-      const safeTags = (Array.isArray(c.tags) ? c.tags : [])
-        .slice(0, 4)
-        .map(t => `<span class="camp-tag">${escapeHtml(t)}</span>`)
-        .join('');
-
-      const card = document.createElement('div');
-      card.className = 'camp-card';
-      card.innerHTML = `
-        <div class="camp-img-placeholder" style="background:${safeBg}">
-          ${safeImageUrl ? `<img class="camp-img" src="${safeImageUrl}" alt="${safeName}" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none'; const f=this.parentElement.querySelector('.camp-fallback-emoji'); if (f) f.style.display='inline';">` : ''}
-          <span class="camp-fallback-emoji" style="font-size:3.5rem; ${safeImageUrl ? 'display:none;' : ''}">${safeEmoji}</span>
-          <div class="camp-badge">Top #${idx + 1}</div>
-        </div>
-        <div class="camp-body">
-          <div class="camp-type">${safeType}</div>
-          <div class="camp-name">${safeName}</div>
-          <div class="camp-location">📍 ${safeLocation}</div>
-          <div class="camp-tags">${safeTags}</div>
-          <div class="camp-footer">
-            <div class="camp-price"><span class="price">${safeRegion}</span><span class="per"> region</span></div>
-            <div class="camp-rating"><span class="star">★</span><span class="score">${safeRating}</span><span class="count"> (${safeReviews})</span></div>
-          </div>
-        </div>`;
-
-      card.onclick = () => openCampDetail(c);
-      grid.appendChild(card);
-    });
+    cards.filter(card => !savedOnly || savedListings.has(card.id)).forEach(card =>
+      grid.appendChild(createResultCardElement(card, openCampDetail, savedListings)));
   }
 
   function setExploreRegionPillState(activeRegion, triggerEl) {
     const pills = Array.from(document.querySelectorAll('#explore-region-filters .explore-pill'));
-    pills.forEach(pill => pill.classList.remove('active'));
+    pills.forEach(pill => {
+      pill.classList.remove('active');
+      pill.setAttribute('aria-pressed', String(pill.dataset.region === activeRegion));
+    });
 
     if (triggerEl) {
       triggerEl.classList.add('active');
@@ -1850,25 +1665,25 @@ let pendingAssistantMessageId = null;
     }
 
     isLoadingExplore = true;
-    setExploreStatus('Scanning top U.S. regions for best reviewed campgrounds...');
+    await loadAppConfig();
+    setExploreStatus('Loading provider campground listings across U.S. regions...');
 
     try {
       const cards = await fetchExploreCampgrounds();
       exploreCards = cards;
       exploreLoaded = true;
 
-      if (!exploreCards.length) {
-        // Fallback guarantees an inspiration page even when live APIs are unavailable.
+      if (!exploreCards.length && APP_CONFIG.demoMode) {
         exploreCards = mockCampsites.map((camp, idx) => enhanceExploreCard({ ...camp }, idx + 1, idx % 2 === 0 ? 'west' : 'northeast'));
       }
 
       const filtered = getExploreCardsByRegion();
-      setExploreStatus(`Showing ${filtered.length} best reviewed campgrounds${activeExploreRegion === 'all' ? ' across the United States' : ` in ${activeExploreRegion}`}.`);
+      setExploreStatus(`Showing ${filtered.length} ${exploreCards.some(card => card.isDemo) ? 'demo' : 'provider'} campground listings. Choose dates to check a stay.`);
       renderExploreGrid();
     } catch (err) {
-      exploreCards = mockCampsites.map((camp, idx) => enhanceExploreCard({ ...camp }, idx + 1, 'west'));
+      exploreCards = APP_CONFIG.demoMode ? mockCampsites.map((camp, idx) => enhanceExploreCard({ ...camp }, idx + 1, 'west')) : [];
       exploreLoaded = true;
-      setExploreStatus('Live sources were unavailable, so Campin loaded featured inspiration campgrounds.');
+      setExploreStatus(APP_CONFIG.demoMode ? 'Live sources unavailable. Showing demo listings, not live inventory.' : 'Live sources unavailable. Check provider configuration or retry.');
       renderExploreGrid();
     } finally {
       isLoadingExplore = false;
@@ -1879,367 +1694,64 @@ let pendingAssistantMessageId = null;
     activeExploreRegion = region || 'all';
     setExploreRegionPillState(activeExploreRegion, triggerEl);
     const filtered = getExploreCardsByRegion();
-    setExploreStatus(`Showing ${filtered.length} best reviewed campgrounds${activeExploreRegion === 'all' ? ' across the United States' : ` in ${activeExploreRegion}`}.`);
+    setExploreStatus(`Showing ${filtered.length} ${exploreCards.some(card => card.isDemo) ? 'demo' : 'provider'} campground listings${activeExploreRegion === 'all' ? ' across the United States' : ` in ${activeExploreRegion}`}.`);
     renderExploreGrid();
   }
 
-  function applyIntentScoring(card, intent) {
-    if (!intent || intent.enabled !== true) {
-      return { ...card, intentScore: 0 };
-    }
-
-    const textCorpus = [
-      card.name,
-      card.type,
-      card.loc,
-      card.badge,
-      ...(Array.isArray(card.tags) ? card.tags : [])
-    ].join(' ').toLowerCase();
-
-    const intentTokens = [
-      ...tokenizeText(intent.queryRewrite),
-      ...tokenizeText(intent.location),
-      ...tokenizeText((intent.priorities || []).join(' '))
-    ];
-
-    const uniqueIntentTokens = [...new Set(intentTokens)];
-    let intentScore = 0;
-
-    if (uniqueIntentTokens.length > 0) {
-      const matched = uniqueIntentTokens.filter(token => textCorpus.includes(token)).length;
-      intentScore += (matched / uniqueIntentTokens.length) * 40;
-    }
-
-    const tags = Array.isArray(card.tags) ? card.tags.map(t => String(t).toLowerCase()) : [];
-    const hasRv = /\brv\b/.test(textCorpus) || tags.some(t => t.includes('rv'));
-    const hasDog = textCorpus.includes('dog') || tags.some(t => t.includes('dog'));
-    const hasWater = /water|lake|river|ocean|coast|beach/.test(textCorpus);
-    const hasTent = textCorpus.includes('tent') || tags.some(t => t.includes('tent'));
-
-    if (intent.constraints?.rv === true) {
-      intentScore += hasRv ? 12 : -8;
-    }
-    if (intent.constraints?.dogFriendly === true) {
-      intentScore += hasDog ? 10 : -6;
-    }
-    if (intent.constraints?.waterfront === true) {
-      intentScore += hasWater ? 10 : -6;
-    }
-    if (intent.constraints?.tent === true) {
-      intentScore += hasTent ? 8 : -4;
-    }
-
-    if (intent.location) {
-      const locationTokens = tokenizeText(intent.location);
-      const locationMatches = locationTokens.filter(token => String(card.loc || '').toLowerCase().includes(token)).length;
-      if (locationTokens.length > 0) {
-        intentScore += (locationMatches / locationTokens.length) * 20;
+  async function fetchLiveInventory(query, intent, stay, signal) {
+    let origin = null;
+    if (intent?.location) {
+      try {
+        const response = await apiClient.getSearchLocation(intent.location, { signal });
+        if (response.ok) origin = (await response.json()).location;
+      } catch (error) {
+        if (signal.aborted) throw error;
       }
     }
-
-    if (Number.isFinite(Number(intent.constraints?.maxPrice)) && Number(intent.constraints.maxPrice) > 0) {
-      const maxPrice = Number(intent.constraints.maxPrice);
-      const price = Number(card.price || 0);
-      if (price > maxPrice) {
-        intentScore -= Math.min(12, ((price - maxPrice) / Math.max(1, maxPrice)) * 12);
-      } else {
-        intentScore += 4;
-      }
-    }
-
-    const normalizedIntentScore = Math.max(0, Math.round(intentScore * 10) / 10);
-    return {
-      ...card,
-      intentScore: normalizedIntentScore,
-      ai_score: card.ai_score + (normalizedIntentScore * 0.35)
-    };
-  }
-
-  function cardMatchesIntent(card, intent) {
-    if (!intent || intent.enabled !== true) {
-      return true;
-    }
-
-    const textCorpus = [
-      card.name,
-      card.type,
-      card.loc,
-      card.badge,
-      ...(Array.isArray(card.tags) ? card.tags : [])
-    ].join(' ').toLowerCase();
-
-    const hasRv = /\brv\b/.test(textCorpus);
-    const hasDog = textCorpus.includes('dog');
-    const hasWater = /water|lake|river|ocean|coast|beach/.test(textCorpus);
-    const hasTent = textCorpus.includes('tent');
-
-    if (intent.constraints?.rv === true && !hasRv) {
-      return false;
-    }
-    if (intent.constraints?.dogFriendly === true && !hasDog) {
-      return false;
-    }
-    if (intent.constraints?.waterfront === true && !hasWater) {
-      return false;
-    }
-    if (intent.constraints?.tent === true && !hasTent) {
-      return false;
-    }
-    if (Number.isFinite(Number(intent.constraints?.maxPrice)) && Number(intent.constraints.maxPrice) > 0) {
-      const maxPrice = Number(intent.constraints.maxPrice);
-      if (Number(card.price || 0) > maxPrice) {
-        return false;
-      }
-    }
-
-    const locationText = String(intent.location || '').trim().toLowerCase();
-    if (locationText) {
-      const locationTokens = tokenizeText(locationText);
-      const cardLocationCorpus = [card.loc, card.name, card.type].join(' ').toLowerCase();
-      const locationMatchCount = locationTokens.filter(token => cardLocationCorpus.includes(token)).length;
-
-      if (locationTokens.length > 0 && locationMatchCount === 0) {
-        return false;
-      }
-    }
-
-    return (card.intentScore || 0) >= 10;
-  }
-
-  function hasExplicitLocationConstraint(intent, query) {
-    if (String(intent?.location || '').trim()) {
-      return true;
-    }
-
-    const q = String(query || '').toLowerCase().trim();
-    if (!q) {
-      return false;
-    }
-
-    return /\b(near|in|around)\s+[a-z]/.test(q) || /\bseattle\b/.test(q);
-  }
-
-  async function judgeResultsAgainstPrompt(query, intent, cards) {
-    const candidateCards = Array.isArray(cards) ? cards.slice(0, 8) : [];
-    if (!query || candidateCards.length === 0) {
-      return {
-        cards: candidateCards,
-        source: 'fallback',
-        rejectedCount: 0,
-        confidence: 0
-      };
-    }
-
-    const payload = {
-      query: String(query || '').slice(0, 260),
-      intent: intent && typeof intent === 'object' ? {
-        enabled: intent.enabled === true,
-        location: String(intent.location || '').slice(0, 64),
-        constraints: intent.constraints && typeof intent.constraints === 'object' ? intent.constraints : {},
-        priorities: Array.isArray(intent.priorities) ? intent.priorities.slice(0, 6) : []
-      } : {},
-      cards: candidateCards.map(card => ({
-        id: String(card.id || '').slice(0, 80),
-        name: String(card.name || '').slice(0, 100),
-        type: String(card.type || '').slice(0, 80),
-        loc: String(card.loc || '').slice(0, 80),
-        price: Number.isFinite(Number(card.price)) ? Number(card.price) : null,
-        tags: Array.isArray(card.tags) ? card.tags.slice(0, 6) : [],
-        badge: String(card.badge || '').slice(0, 60)
-      }))
-    };
-
-    try {
-      const res = await apiClient.judgeResults(payload);
-
-      if (!res.ok) {
-        return {
-          cards: candidateCards,
-          source: 'fallback',
-          rejectedCount: 0,
-          confidence: 0
-        };
-      }
-
-      const data = await res.json();
-      const judge = data?.judge || {};
-      const validatedIds = Array.isArray(judge.validatedIds)
-        ? judge.validatedIds.map(id => String(id || '').trim()).filter(Boolean)
-        : [];
-
-      if (validatedIds.length === 0) {
-        if (judge.source === 'foundry' && hasExplicitLocationConstraint(intent, query)) {
-          return {
-            cards: [],
-            source: 'foundry',
-            rejectedCount: candidateCards.length,
-            confidence: Number.isFinite(Number(judge.confidence)) ? Number(judge.confidence) : 0
-          };
-        }
-
-        return {
-          cards: candidateCards,
-          source: 'fallback',
-          rejectedCount: 0,
-          confidence: 0
-        };
-      }
-
-      const validatedSet = new Set(validatedIds);
-      const indexById = new Map(validatedIds.map((id, idx) => [id, idx]));
-      const approvedCards = candidateCards
-        .filter(card => validatedSet.has(card.id))
-        .sort((a, b) => {
-          const idxA = indexById.has(a.id) ? indexById.get(a.id) : 999;
-          const idxB = indexById.has(b.id) ? indexById.get(b.id) : 999;
-          if (idxA !== idxB) {
-            return idxA - idxB;
-          }
-          return (b.ai_score || 0) - (a.ai_score || 0);
-        });
-
-      if (approvedCards.length === 0) {
-        if (judge.source === 'foundry' && hasExplicitLocationConstraint(intent, query)) {
-          return {
-            cards: [],
-            source: 'foundry',
-            rejectedCount: candidateCards.length,
-            confidence: Number.isFinite(Number(judge.confidence)) ? Number(judge.confidence) : 0
-          };
-        }
-
-        return {
-          cards: candidateCards,
-          source: 'fallback',
-          rejectedCount: 0,
-          confidence: 0
-        };
-      }
-
-      return {
-        cards: approvedCards,
-        source: judge.source === 'foundry' ? 'foundry' : 'fallback',
-        rejectedCount: Math.max(0, candidateCards.length - approvedCards.length),
-        confidence: Number.isFinite(Number(judge.confidence)) ? Number(judge.confidence) : 0
-      };
-    } catch (err) {
-      return {
-        cards: candidateCards,
-        source: 'fallback',
-        rejectedCount: 0,
-        confidence: 0
-      };
-    }
-  }
-
-  async function fetchLiveInventory(query, intent) {
-    const currentMonthStartIso = toIsoMonthStart();
-    const rewrittenQuery = intent?.enabled ? (intent.queryRewrite || query) : query;
-
-    const [ridbFacilities, npsCampgrounds] = await Promise.all([
-      fetchRidbFacilities(rewrittenQuery, intent).catch(err => {
-        console.warn('RIDB fetch failed:', err);
-        return [];
-      }),
-      fetchNpsCampgrounds(rewrittenQuery).catch(err => {
-        console.warn('NPS fetch failed:', err);
-        return [];
-      })
+    const rewrittenQuery = intent?.location ? `${intent.location} campground` : (intent?.queryRewrite || query);
+    const results = await Promise.allSettled([
+      fetchRidbFacilities(rewrittenQuery, intent, signal, origin),
+      fetchNpsCampgrounds(rewrittenQuery, signal)
     ]);
-
-    const ridbCards = await Promise.all(
-      ridbFacilities.slice(0, 8).map(async (facility, index) => {
-        const recFacilityId = String(facility?.providerId || facility?.FacilityID || '').trim();
-        const [availabilityPayload, campsiteSummary] = await Promise.all([
-          fetchRecreationAvailability(recFacilityId, currentMonthStartIso),
-          fetchRidbCampsiteSummary(recFacilityId).catch(() => summarizeRidbCampsites([]))
-        ]);
-        const availableSites = computeAvailableSites(availabilityPayload);
-        return mapRidbToCampCard(facility, index, availableSites, campsiteSummary);
-      })
-    );
-
-    const npsCards = await Promise.all(
-      npsCampgrounds.slice(0, 4).map(async (campground, index) => {
-        const recId = extractRecreationCampgroundId(campground.reservationUrl || '');
-        const availabilityPayload = recId ? await fetchRecreationAvailability(recId, currentMonthStartIso) : null;
-        const availableSites = computeAvailableSites(availabilityPayload);
-        return mapNpsToCampCard(campground, index, availableSites);
-      })
-    );
-
-    const scoredCards = dedupeInventoryCards([...ridbCards, ...npsCards])
-      .map(c => applyIntentScoring(c, intent))
-      .filter(c => !!c.name)
-      .sort((a, b) => {
-        if ((b.intentScore || 0) !== (a.intentScore || 0)) {
-          return (b.intentScore || 0) - (a.intentScore || 0);
-        }
-
-        return b.ai_score - a.ai_score;
-      });
-
-    let cards = await hydrateCardLocationLabels(scoredCards);
-    let usingClosestIntentFallback = false;
-    let usingClosestIntentBlend = false;
-
-    if (intent && intent.enabled) {
-      const strictMatches = cards.filter(c => cardMatchesIntent(c, intent));
-      if (strictMatches.length > 0) {
-        const closestExtras = cards.filter(c => !strictMatches.some(match => match.id === c.id));
-        cards = [...strictMatches, ...closestExtras].slice(0, 8);
-        usingClosestIntentBlend = strictMatches.length < Math.min(8, cards.length);
-      } else {
-        // Closest Intent Match mode: return top near-matches by intent score when strict mode yields zero.
-        cards = cards.filter(c => (c.intentScore || 0) > 0).slice(0, 8);
-        usingClosestIntentFallback = true;
-      }
-    }
-
-    sourceDiagnostics = {
-      ridbCount: ridbCards.length,
-      npsCount: npsCards.length
-    };
-
-    const hasRec = ridbCards.length > 0;
-    const hasNps = npsCards.length > 0;
-
-    if (hasRec || hasNps) {
-      const parts = [];
-      if (hasRec) {
-        parts.push(`Recreation.gov (${sourceDiagnostics.ridbCount})`);
-      }
-      if (hasNps) {
-        parts.push(`NPS (${sourceDiagnostics.npsCount})`);
-      }
-      inventorySourceText = `Live inventory from ${parts.join(' + ')}`;
-    } else {
-      inventorySourceText = APP_CONFIG.demoMode ? 'Demo mode inventory (no live results returned)' : 'No live inventory returned';
-    }
-
-    if (intent && intent.enabled) {
-      const confidencePct = Math.round((intent.confidence || 0) * 100);
-      inventorySourceText += ` · Intent: Foundry (${confidencePct}%)`;
-      if (usingClosestIntentFallback) {
-        inventorySourceText += ' · Mode: Closest intent matches';
-      } else if (usingClosestIntentBlend) {
-        inventorySourceText += ' · Mode: Strict matches topped up with closest matches';
-      }
-    }
-
-    const judgeOutcome = await judgeResultsAgainstPrompt(query, intent, cards);
-    cards = sortCardsByMatchPercent(judgeOutcome.cards);
-    if (judgeOutcome.source === 'foundry') {
-      const judgeConfidencePct = Math.round(Math.max(0, Math.min(1, judgeOutcome.confidence || 0.5)) * 100);
-      inventorySourceText += ` · Judge: Foundry (${judgeConfidencePct}%)`;
-      if (judgeOutcome.rejectedCount > 0) {
-        inventorySourceText += ` · Removed ${judgeOutcome.rejectedCount} low-match result${judgeOutcome.rejectedCount === 1 ? '' : 's'}`;
-      }
-    } else {
-      inventorySourceText += ' · Judge: fallback';
-    }
-
-    return cards;
+    if (signal.aborted) throw new DOMException('Search cancelled', 'AbortError');
+    if (results.every(result => result.status === 'rejected')) throw new Error('Providers unavailable.');
+    const ridbOutcome = results[0].status === 'fulfilled'
+      ? results[0].value
+      : { records: [], radiusKm: null };
+    const ridb = ridbOutcome.records;
+    const searchRadiusKm = ridbOutcome.radiusKm;
+    const nps = results[1].status === 'fulfilled' ? results[1].value : [];
+    const ridbCards = await Promise.all(ridb.slice(0, 8).map(async (facility, index) => {
+      const [availability, summary] = await Promise.all([
+        fetchStayAvailability(facility.providerId, stay, signal),
+        fetchRidbCampsiteSummary(facility.providerId, signal).catch(error => {
+          if (signal.aborted) throw error;
+          return summarizeRidbCampsites([]);
+        })
+      ]);
+      return { ...mapRidbToCampCard(facility, index, availability, summary), availabilityTrip: { ...stay } };
+    }));
+    const npsCards = await Promise.all(nps.slice(0, 4).map(async (campground, index) => {
+      const recId = extractRecreationCampgroundId(campground.reservationUrl || '');
+      const availability = await fetchStayAvailability(recId, stay, signal);
+      return { ...mapNpsToCampCard(campground, index, availability), availabilityTrip: { ...stay } };
+    }));
+    const queryTokens = tokenizeQuery(query);
+    const cards = dedupeInventoryCards([...ridbCards, ...npsCards])
+      .filter(card => card.name)
+      .map(card => evaluateRequirements(card, intent, origin, searchRadiusKm ?? 80))
+      .map(card => ({ ...card, relevanceScore: compositeRelevanceScore(card, { queryTokens, intent }) }))
+      .sort((a, b) => a.missingRequirements.length - b.missingRequirements.length ||
+        b.relevanceScore - a.relevanceScore ||
+        (a.distanceKm ?? Infinity) - (b.distanceKm ?? Infinity));
+    const names = ['Recreation.gov', 'NPS'];
+    const source = results.map((result, index) => `${names[index]}: ${result.status === 'fulfilled' ? 'connected' : 'unavailable'}`).join(' · ');
+    const proximityNote = intent?.location
+      ? (origin && searchRadiusKm
+          ? ` · within ${searchRadiusKm} km of ${origin.label || intent.location}`
+          : (origin ? '' : ' · Proximity not verified'))
+      : '';
+    return { cards: cards.slice(0, 15), origin, radiusKm: searchRadiusKm, source: `${source} · Intent: ${intent?.source || 'fallback'}${proximityNote}` };
   }
 
   // ---- RESULTS GRID ----
@@ -2247,7 +1759,7 @@ let pendingAssistantMessageId = null;
     const grid = document.getElementById('results-grid');
     const countEl = document.getElementById('results-count');
     const aiTextEl = document.getElementById('ai-match-text');
-    const cardsForRender = refreshCardsBeforeRender(sortCardsByMatchPercent(campsites), lastIntent);
+    const cardsForRender = refreshCardsBeforeRender(campsites, lastIntent);
     renderResultsView({
       grid,
       countEl,
@@ -2257,12 +1769,14 @@ let pendingAssistantMessageId = null;
       pendingClarification,
       campsites,
       cardsForRender,
-      getMatchPercent: getCardMatchPercent,
-      onOpenDetail: openCampDetail
+      onOpenDetail: openCampDetail,
+      savedListings, savedOnly, searchError, onRetry: retrySearch
     });
   }
 
   function openCampDetail(camp) {
+    detailOrigin = document.getElementById('view-explore').classList.contains('active') ? 'explore' : 'results';
+    detailSessions.cancel();
     currentCamp = camp;
     renderDetailListingFields(camp);
     renderDetailBookingCta(camp);
@@ -2270,46 +1784,32 @@ let pendingAssistantMessageId = null;
     renderDetailPhotos(camp);
     showView('detail');
 
-    // Guard against stale/partial runtime bundles where this symbol can be missing.
-    if (typeof hydrateDetailGoogleReviews === 'function') {
+    if (!camp.isDemo) {
       hydrateDetailGoogleReviews(camp);
-    } else {
-      fetchGoogleReviews(camp)
-        .then(payload => {
-          if (!currentCamp || currentCamp.id !== camp.id) {
-            return;
-          }
-          renderGoogleReviews(camp, payload);
-        })
-        .catch(() => {
-          if (!currentCamp || currentCamp.id !== camp.id) {
-            return;
-          }
-          renderGoogleReviews(camp, {
-            enabled: false,
-            source: 'fallback',
-            reviews: [],
-            error: 'Google reviews request failed.'
-          });
-        });
+      hydrateDetailPhotos(camp);
+      if (trip.checkIn && !camp.availabilityTrip) refreshDetailAvailability();
     }
-
-    hydrateDetailPhotos(camp);
   }
 
-  function extractAvailableSitesCount(camp) {
-    const direct = Number(camp?.availableSites);
-    if (Number.isFinite(direct)) {
-      return Math.max(0, Math.round(direct));
+  async function refreshDetailAvailability() {
+    if (!currentCamp || currentCamp.isDemo || validateTrip(trip) || !trip.checkIn) return;
+    const session = detailSessions.start();
+    const id = currentCamp.id;
+    const stay = { ...trip };
+    currentCamp = { ...currentCamp, availability: { state: 'checking', count: null, checkedAt: null } };
+    renderDetailListingFields(currentCamp);
+    try {
+      const availability = await fetchStayAvailability(currentCamp.recreationCampgroundId, stay, session.signal);
+      if (!session.isCurrent() || currentCamp?.id !== id) return;
+      currentCamp = { ...currentCamp, availability, availabilityTrip: stay };
+      campsites = campsites.map(card => card.id === id ? { ...card, availability, availabilityTrip: stay } : card);
+      renderResultsGrid();
+      renderDetailListingFields(currentCamp);
+    } catch {
+      if (!session.isCurrent() || currentCamp?.id !== id) return;
+      currentCamp = { ...currentCamp, availability: { state: 'unknown', count: null, checkedAt: new Date().toISOString() } };
+      renderDetailListingFields(currentCamp);
     }
-
-    const badgeText = String(camp?.badge || '');
-    const match = badgeText.match(/(\d+)\s+sites?/i);
-    if (match) {
-      return Math.max(0, Number(match[1]));
-    }
-
-    return null;
   }
 
   function amenityIcon(tag) {
@@ -2325,7 +1825,7 @@ let pendingAssistantMessageId = null;
     return '⛺';
   }
 
-  function renderDetailListingFields(camp) {
+  function renderDetailListingFields(camp, resetReviews = true) {
     if (!camp) {
       return;
     }
@@ -2355,10 +1855,8 @@ let pendingAssistantMessageId = null;
     });
     const topTags = tags.slice(0, 3);
     const matchPercent = getCardMatchPercent(camp);
-    const availableSites = extractAvailableSitesCount(camp);
-
-    const rating = Number(camp.rating);
-    const reviews = Number(camp.reviews);
+    const rating = knownNumber(camp.rating);
+    const reviews = knownNumber(camp.reviews);
     const narrative = buildDetailNarrative(camp);
 
     if (nameEl) {
@@ -2373,7 +1871,7 @@ let pendingAssistantMessageId = null;
       const ratingLabel = Number.isFinite(rating) && Number.isFinite(reviews)
         ? `⭐ ${rating.toFixed(2)} · ${Math.round(reviews)} reviews`
         : '⭐ Rating unavailable';
-      const matchLabel = Number.isFinite(Number(matchPercent)) ? `${matchPercent}% match` : null;
+      const matchLabel = Number.isFinite(matchPercent) ? `${matchPercent}% match` : null;
 
       metaEl.innerHTML = [
         `<span>${escapeHtml(ratingLabel)}</span>`,
@@ -2392,13 +1890,6 @@ let pendingAssistantMessageId = null;
     }
 
     if (summaryEl) {
-      const providerLabel = camp.sourceProvider === 'nps' ? 'NPS listing signal' : 'Recreation.gov inventory signal';
-      const availabilitySummary = Number.isFinite(Number(availableSites))
-        ? (availableSites > 0 ? `${availableSites} sites currently available.` : 'No currently available sites were reported.')
-        : 'Availability count is not provided for this listing.';
-      const ratingSummary = Number.isFinite(rating) && Number.isFinite(reviews)
-        ? `Rated ${rating.toFixed(2)} from ${Math.round(reviews)} reviews.`
-        : 'Rating details are limited for this listing.';
       summaryEl.textContent = narrative.summary;
     }
 
@@ -2412,14 +1903,14 @@ let pendingAssistantMessageId = null;
         : '<div class="amenity-item"><span class="amenity-icon">ℹ️</span> Amenities are not listed for this provider record.</div>';
     }
 
-    if (reviewsEl) {
+    if (reviewsEl && resetReviews && !camp.googleReviewSummary) {
       reviewsEl.innerHTML = `
         <div class="review-card">
           <div class="review-header">
             <span class="reviewer">Google Reviews</span>
             <span class="review-date">Loading</span>
           </div>
-          <div class="review-text">Fetching latest Google reviews for this campground...</div>
+          <div class="review-text">${camp.isDemo ? 'Demo ratings are illustrative, not provider reviews.' : 'Fetching Google reviews for this campground...'}</div>
         </div>
       `;
     }
@@ -2458,10 +1949,14 @@ let pendingAssistantMessageId = null;
     }
 
     if (alertBannerEl) {
-      alertBannerEl.textContent = Number.isFinite(Number(availableSites))
-        ? (availableSites > 0 ? `🔥 ${availableSites} site${availableSites === 1 ? '' : 's'} currently available` : 'No current availability reported')
-        : (String(camp.badge || '').trim() || 'Live availability status not provided');
+      alertBannerEl.textContent = availabilityLabel(camp);
     }
+    const checkedAt = document.getElementById('availability-check-note');
+    if (checkedAt) checkedAt.textContent = camp.availability?.checkedAt
+      ? `Checked ${new Date(camp.availability.checkedAt).toLocaleString()}. Availability can change. This is not a reservation.`
+      : 'Availability is not a reservation. Site-specific requirements must be confirmed with the provider.';
+    const recheck = document.getElementById('detail-check-availability');
+    if (recheck) recheck.disabled = camp.isDemo || !trip.checkIn || Boolean(validateTrip(trip)) || camp.availability?.state === 'checking';
   }
 
   async function fetchGoogleReviews(camp) {
@@ -2512,8 +2007,8 @@ let pendingAssistantMessageId = null;
           enabled: payload?.enabled === true,
           source: String(payload?.source || 'google').trim(),
           placeName: String(payload?.placeName || '').trim(),
-          rating: Number.isFinite(Number(payload?.rating)) ? Number(payload.rating) : null,
-          userRatingsTotal: Number.isFinite(Number(payload?.userRatingsTotal)) ? Number(payload.userRatingsTotal) : null,
+          rating: knownNumber(payload?.rating),
+          userRatingsTotal: knownNumber(payload?.userRatingsTotal),
           placeUrl: String(payload?.placeUrl || '').trim(),
           reviews: (Array.isArray(payload?.reviews) ? payload.reviews : []).slice(0, 5),
           error: String(payload?.error || '').trim()
@@ -2560,10 +2055,10 @@ let pendingAssistantMessageId = null;
       return;
     }
 
-    const rating = Number(reviewPayload?.rating);
-    const ratingsTotal = Number(reviewPayload?.userRatingsTotal);
+    const rating = knownNumber(reviewPayload?.rating);
+    const ratingsTotal = knownNumber(reviewPayload?.userRatingsTotal);
     const placeName = String(reviewPayload?.placeName || camp.name || 'Google place').trim();
-    const placeUrl = String(reviewPayload?.placeUrl || '').trim();
+    const placeUrl = safeHttpUrl(reviewPayload?.placeUrl);
     const reviews = Array.isArray(reviewPayload?.reviews) ? reviewPayload.reviews : [];
 
     if (reviews.length > 0) {
@@ -2608,14 +2103,14 @@ let pendingAssistantMessageId = null;
 
       reviewsEl.innerHTML = `${headerCard}${reviewCards}`;
       if (currentCamp && currentCamp.id === camp.id) {
-        renderDetailListingFields(currentCamp);
+        renderDetailListingFields(currentCamp, false);
       }
       return;
     }
 
     const fallbackReason = escapeHtml(String(reviewPayload?.error || 'No Google reviews were returned for this campground.'));
-    const fallbackRatingText = Number.isFinite(Number(camp?.rating))
-      ? `${camp.rating.toFixed(2)} average rating from ${Math.round(Number(camp?.reviews || 0))} reviews.`
+    const fallbackRatingText = knownNumber(camp?.rating) !== null
+      ? `${Number(camp.rating).toFixed(2)} ${camp.isDemo ? 'illustrative demo' : 'provider'} rating.`
       : 'Rating details are unavailable for this listing.';
 
     reviewsEl.innerHTML = `
@@ -2638,12 +2133,12 @@ let pendingAssistantMessageId = null;
         ...currentCamp,
         googleReviewSummary: {
           placeName,
-          rating: Number.isFinite(Number(camp?.rating)) ? Number(camp.rating) : null,
-          userRatingsTotal: Number.isFinite(Number(camp?.reviews)) ? Number(camp.reviews) : null,
+          rating: knownNumber(camp?.rating),
+          userRatingsTotal: knownNumber(camp?.reviews),
           highlights: []
         }
       };
-      renderDetailListingFields(currentCamp);
+      renderDetailListingFields(currentCamp, false);
     }
   }
 
@@ -2682,6 +2177,13 @@ let pendingAssistantMessageId = null;
           slot.textContent = String(fallbackEmoji || '🏕️');
         });
         slot.appendChild(image);
+        if (camp.illustrativePhotoUrls?.includes(photoUrl)) {
+          image.alt = `Illustrative photo, not verified for ${camp.name}`;
+          const label = document.createElement('span');
+          label.className = 'photo-source-label';
+          label.textContent = 'Illustrative photo · Wikimedia';
+          slot.appendChild(label);
+        }
       } else {
         slot.textContent = String(fallbackEmoji || '🏕️');
       }
@@ -2735,7 +2237,7 @@ let pendingAssistantMessageId = null;
     currentCamp = {
       ...currentCamp,
       photoUrls: [...new Set([...existingPhotos, ...fallbackPhotos])],
-      imageUrl: currentCamp.imageUrl || fallbackPhotos[0] || ''
+      illustrativePhotoUrls: [...new Set([...(currentCamp.illustrativePhotoUrls || []), ...fallbackPhotos])]
     };
 
     renderDetailPhotos(currentCamp);
@@ -2761,9 +2263,17 @@ let pendingAssistantMessageId = null;
     renderDetailPricing();
   }
 
+  function toggleSavedFilter() {
+    savedOnly = !savedOnly;
+    document.querySelectorAll('.saved-filter').forEach(button => button.setAttribute('aria-pressed', String(savedOnly)));
+    renderResultsGrid();
+    renderExploreGrid();
+  }
+
   // ---- FILTER TOGGLES ----
   function togglePill(el) {
     el.classList.toggle('active');
+    el.setAttribute('aria-pressed', String(el.classList.contains('active')));
     applyDynamicPromptFromSelections();
   }
   function toggleTag(el) { el.classList.toggle('on'); }
@@ -2785,13 +2295,15 @@ let pendingAssistantMessageId = null;
   renderDetailBookingCta();
   renderDetailPricing(currentCamp);
 
-  ['checkin-date', 'checkout-date'].forEach(id => {
+  ['checkin-date', 'checkout-date', 'trip-checkin', 'trip-checkout', 'results-trip-checkin', 'results-trip-checkout'].forEach(id => {
     const input = document.getElementById(id);
     if (input) {
       input.addEventListener('change', () => {
-        renderDetailBookingCta();
-        renderDetailPricing();
+        const isCheckIn = /checkin/.test(id);
+        const next = { ...trip, [isCheckIn ? 'checkIn' : 'checkOut']: input.value || null };
+        setTripDates(next);
       });
+      input.min = new Date().toISOString().slice(0, 10);
     }
   });
 
@@ -2821,11 +2333,20 @@ let pendingAssistantMessageId = null;
   ['date-filter', 'guest-filter'].forEach(id => {
     const input = document.getElementById(id);
     if (input) {
-      input.addEventListener('change', () => applyDynamicPromptFromSelections());
+      input.addEventListener('change', () => {
+        if (id === 'date-filter') setTripDates(weekendTrip(input.value));
+        else {
+          guestCount = Number(input.value.match(/\d+/)?.[0]) || 2;
+          document.getElementById('guest-count').textContent = guestCount;
+        }
+        applyDynamicPromptFromSelections();
+      });
     }
   });
 
   syncActiveNav('home');
+  document.querySelectorAll('#view-home button.filter-pill').forEach(button => button.setAttribute('aria-pressed', 'false'));
+  setExploreRegionPillState('all');
 
   // Expose handlers for inline HTML event attributes.
   window.showView = showView;
@@ -2845,3 +2366,6 @@ let pendingAssistantMessageId = null;
   window.exploreByRegion = exploreByRegion;
   window.viewItinerary = viewItinerary;
   window.downloadCampinApp = downloadCampinApp;
+  window.refreshDetailAvailability = refreshDetailAvailability;
+  window.backFromDetail = backFromDetail;
+  window.toggleSavedFilter = toggleSavedFilter;

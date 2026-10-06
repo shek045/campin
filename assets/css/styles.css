@@ -20,6 +20,31 @@
   --shadow-soft: 0 12px 36px rgba(28,32,24,0.08);
   --shadow-card: 0 8px 24px rgba(28,32,24,0.06);
   }
+  [hidden] { display: none !important; }
+  :focus-visible { outline: 3px solid var(--forest); outline-offset: 3px; }
+  .camp-open {
+    color: inherit; background: none; border: 0; padding: 0;
+    font: inherit; text-align: left; cursor: pointer;
+  }
+  .camp-fallback-emoji { font-size: 3.5rem; }
+  .camp-availability, .camp-requirements { font-size: .82rem; line-height: 1.5; margin: .5rem 0; }
+  .camp-requirements { color: var(--bark); }
+  .result-group-title, .results-message { grid-column: 1 / -1; }
+  .result-group-title { font-size: 1rem; margin-top: .5rem; }
+  .results-message { padding: 1.25rem; border: 1px solid var(--border-med); border-radius: var(--radius-md); }
+  .retry-search, .saved-filter {
+    border: 1px solid var(--forest); color: var(--forest); background: white;
+    border-radius: var(--radius-sm); padding: .65rem .9rem; cursor: pointer; font: inherit;
+  }
+  .results-message .retry-search { display: block; margin-top: .75rem; }
+  .saved-filter[aria-pressed="true"] { color: white; background: var(--forest); }
+  button:disabled { opacity: .6; cursor: not-allowed; }
+  .trip-date-fields { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: .8rem; }
+  .trip-date-fields label { display: grid; gap: .35rem; font-size: .8rem; flex: 1; }
+  .trip-date-fields input { min-width: 0; width: 100%; padding: .65rem; border: 1px solid var(--border-med); border-radius: var(--radius-sm); font: inherit; }
+  .trip-date-note { font-size: .75rem; margin-top: .5rem; color: var(--text-mid); }
+  .detail-photo { position: relative; }
+  .photo-source-label { position: absolute; bottom: 0; left: 0; padding: .4rem; font-size: .7rem; color: white; background: rgba(0,0,0,.7); }
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   html { scroll-behavior: smooth; }
   body {

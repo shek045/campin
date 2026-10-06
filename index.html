@@ -31,11 +31,11 @@
       <aside class="chat-home-sidebar">
         <div class="hero-eyebrow">✦ Smart campsite finder for real availability</div>
         <h1 class="chat-home-title">Find your perfect campsite in minutes, not hours.</h1>
-        <p class="chat-home-copy">Tell Campin what kind of trip you want. It searches live campground data, ranks your best matches, and highlights what is bookable now.</p>
+        <p class="chat-home-copy">Tell Campin what kind of trip you want. It searches provider campground listings and checks availability for your selected stay. Confirm reservations with the provider.</p>
         <div class="chat-home-metrics">
-          <div class="chat-metric-card"><strong>12,400+</strong><span>Campsites indexed</span></div>
-          <div class="chat-metric-card"><strong>Live data</strong><span>From trusted public sources</span></div>
-          <div class="chat-metric-card"><strong>Ranked</strong><span>By match quality and availability</span></div>
+          <div class="chat-metric-card"><strong>Federal listings</strong><span>Recreation.gov and NPS</span></div>
+          <div class="chat-metric-card"><strong>Availability signals</strong><span>Confirm dates with the provider</span></div>
+          <div class="chat-metric-card"><strong>Direct booking</strong><span>Complete reservations on the provider site</span></div>
         </div>
       </aside>
 
@@ -47,7 +47,7 @@
           </div>
         </div>
 
-        <div class="chat-thread chat-thread-home" id="home-chat-thread"></div>
+        <div class="chat-thread chat-thread-home" id="home-chat-thread" role="log" aria-live="polite" aria-label="Search conversation"></div>
 
         <div class="chat-composer-card">
           <label class="search-label" for="main-search">Describe your trip</label>
@@ -60,9 +60,7 @@
               📅 <select id="date-filter">
                 <option>Any dates</option>
                 <option>This weekend</option>
-                <option selected>June 6–8</option>
-                <option>June 13–15</option>
-                <option>July 4th weekend</option>
+                <option>Next weekend</option>
               </select>
             </div>
             <div class="filter-pill">
@@ -78,6 +76,11 @@
             <button type="button" class="filter-pill" onclick="togglePill(this)">🐕 Dog-friendly</button>
             <button type="button" class="filter-pill" onclick="togglePill(this)">🔥 Campfire</button>
           </div>
+          <div class="trip-date-fields">
+            <label>Check-in <input type="date" id="trip-checkin"></label>
+            <label>Check-out <input type="date" id="trip-checkout"></label>
+          </div>
+          <p class="trip-date-note">Optional, up to 30 nights. Without dates, availability is not checked.</p>
         </div>
       </div>
     </div>
@@ -90,8 +93,8 @@
     <div class="explore-hero">
       <div>
         <div class="hero-eyebrow">✦ Explore The U.S.</div>
-        <h1 class="explore-title">Camping inspiration from America's best reviewed campgrounds.</h1>
-        <p class="explore-copy">Campin scans live federal and park sources across regions, then surfaces high-rated, high-loved campgrounds to spark your next trip.</p>
+        <h1 class="explore-title">Explore campground listings across America.</h1>
+        <p class="explore-copy">Browse campground listings from federal and park sources across regions, then check details with the provider.</p>
       </div>
       <div class="explore-hero-actions">
         <button class="explore-secondary-btn" onclick="openSearch()">Start a custom search</button>
@@ -115,7 +118,7 @@
       </div>
     </div>
 
-    <div class="explore-status" id="explore-status">Loading best reviewed campgrounds across the United States...</div>
+    <div class="explore-status" id="explore-status">Loading campgrounds across the United States...</div>
 
     <div class="results-grid explore-grid" id="explore-grid">
       <!-- Explore cards injected by JS -->
@@ -134,13 +137,18 @@
           <div class="chat-stage-subtitle">Refine the trip and the results update from live APIs.</div>
         </div>
       </div>
-      <div class="chat-thread chat-thread-results" id="results-chat-thread"></div>
+      <div class="chat-thread chat-thread-results" id="results-chat-thread" role="log" aria-live="polite" aria-label="Search conversation"></div>
       <div class="chat-composer-card chat-results-composer">
         <label class="search-label" for="results-search-input">Refine your request</label>
         <div class="search-input-wrap chat-input-wrap">
           <textarea class="search-textarea chat-textarea" id="results-search-input" placeholder="Ask a follow-up or change the constraints" rows="1"></textarea>
           <button class="search-go-btn" onclick="runSearch()">Send</button>
         </div>
+        <div class="trip-date-fields">
+          <label>Check-in <input type="date" id="results-trip-checkin"></label>
+          <label>Check-out <input type="date" id="results-trip-checkout"></label>
+        </div>
+        <p class="trip-date-note">After changing dates, send your request again to update availability.</p>
       </div>
     </aside>
 
@@ -148,15 +156,10 @@
       <div class="results-header chat-results-header">
         <div class="results-header-copy">
           <div class="results-header-title">Best matches for your trip</div>
-          <div class="results-header-subtitle">Ranked by fit, availability, and traveler-rated quality.</div>
+          <div class="results-header-subtitle">Campground suggestions from provider listings. Verify availability for your dates.</div>
         </div>
-        <span class="results-count" id="results-count">8 campsites found</span>
-        <select class="sort-select">
-          <option>Best match (AI)</option>
-          <option>Price: low to high</option>
-          <option>Rating</option>
-          <option>Distance</option>
-        </select>
+        <span class="results-count" id="results-count" role="status">0 campgrounds found</span>
+        <button type="button" class="saved-filter" aria-pressed="false" onclick="toggleSavedFilter()">Saved in results</button>
       </div>
 
       <div class="results-layout results-layout-chat">
@@ -179,7 +182,7 @@
 
 <!-- ===== VIEW 4: CAMPSITE DETAIL ===== -->
 <div class="view" id="view-detail">
-  <button type="button" class="page-back" onclick="showView('results')">← Back to results</button>
+  <button type="button" class="page-back" onclick="backFromDetail()">← Back to listings</button>
 
   <div class="detail-hero">
     <div class="detail-photo" style="background:#C5D9C0" id="d-photo-1">🌲</div>
@@ -191,21 +194,17 @@
 
   <div class="detail-body">
     <div class="detail-main">
-      <button type="button" class="detail-breadcrumb" id="d-breadcrumb" onclick="showView('results')">← Listing details</button>
+      <button type="button" class="detail-breadcrumb" id="d-breadcrumb" onclick="backFromDetail()">← Listing details</button>
       <h1 class="detail-title" id="d-name">Lakeshore Haven Camp</h1>
       <div class="detail-meta" id="d-meta">
-        <span>⭐ <strong>4.92</strong> · 138 reviews</span>
-        <span class="sep">·</span>
-        <span>📍 Lake Quinault, WA</span>
-        <span class="sep">·</span>
-        <span>State Park</span>
+        <span>Choose a campground to see its details.</span>
       </div>
       <div class="site-tags" id="d-site-tags">
         <span class="site-tag">Live listing</span>
       </div>
 
       <div class="ai-summary-box">
-        <div class="ai-summary-label">✨ AI Review Summary</div>
+        <div class="ai-summary-label">Listing summary</div>
         <div class="ai-summary-text" id="d-ai-summary-text">This summary updates based on the selected listing metadata and live provider signals.</div>
       </div>
 
@@ -245,19 +244,21 @@
     <!-- BOOKING CARD -->
     <div>
       <div class="booking-card">
-        <div class="booking-price" id="d-booking-price">$48 <span class="per">/ night</span></div>
+        <div class="booking-price" id="d-booking-price">Check price with provider</div>
 
-        <div class="alert-banner" id="d-alert-banner">Live availability details are shown here.</div>
+        <div class="alert-banner" id="d-alert-banner">Availability signals are not a reservation.</div>
+        <p class="book-note" id="availability-check-note"></p>
+        <button type="button" class="retry-search" id="detail-check-availability" onclick="refreshDetailAvailability()">Recheck availability</button>
 
         <div class="booking-dates">
           <div class="booking-date-row">
             <div class="date-field">
               <label for="checkin-date">Check-in</label>
-              <input type="date" value="2025-06-06" id="checkin-date">
+              <input type="date" id="checkin-date">
             </div>
             <div class="date-field">
               <label for="checkout-date">Check-out</label>
-              <input type="date" value="2025-06-08" id="checkout-date">
+              <input type="date" id="checkout-date">
             </div>
           </div>
           <div class="guests-field">
@@ -270,177 +271,9 @@
           </div>
         </div>
 
-        <div class="price-breakdown">
-          <div class="price-row-item"><span id="d-price-nights-label">$48 × 2 nights</span><span id="d-price-nights-value">$96</span></div>
-          <div class="price-row-item"><span id="d-price-fee-label">Park fee</span><span id="d-price-fee-value">$5</span></div>
-          <div class="price-row-item total"><span>Total</span><span id="d-price-total-value">$101</span></div>
-        </div>
-
         <button class="book-btn" id="detail-book-btn" onclick="openCampBooking()">Book on provider site</button>
-        <p class="book-note" id="detail-book-note">You will be redirected to the provider to complete booking.</p>
+        <p class="book-note" id="detail-book-note">Prices, fees, and availability must be confirmed on the provider site.</p>
       </div>
-    </div>
-  </div>
-</div>
-
-<!-- ===== VIEW 5: CHECKOUT ===== -->
-<div class="view" id="view-checkout">
-  <button type="button" class="page-back" onclick="showView('detail')">← Back to campsite</button>
-  <div class="checkout-layout">
-    <div>
-      <h1 class="checkout-title">Confirm your reservation</h1>
-
-      <div class="checkout-section">
-        <div class="checkout-section-head">
-          <span class="checkout-section-title">Your trip details</span>
-          <button type="button" class="edit-link" onclick="showView('detail')">Edit</button>
-        </div>
-        <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem;">
-          <div>
-            <div class="form-label">Dates</div>
-            <div style="font-size:0.9rem; font-weight:600">Jun 6 – Jun 8, 2025</div>
-            <div style="font-size:0.8rem; color:var(--text-soft)">2 nights</div>
-          </div>
-          <div>
-            <div class="form-label">Guests</div>
-            <div style="font-size:0.9rem; font-weight:600">2 guests</div>
-          </div>
-          <div>
-            <div class="form-label">Campsite</div>
-            <div style="font-size:0.9rem; font-weight:600">Site #7 — Lake View</div>
-            <div style="font-size:0.8rem; color:var(--text-soft)">Tent · Dog-friendly</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="checkout-section">
-        <div class="checkout-section-head">
-          <span class="checkout-section-title">Guest information</span>
-        </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label class="form-label" for="checkout-first-name">First name</label>
-            <input class="form-input" id="checkout-first-name" type="text" placeholder="Alex">
-          </div>
-          <div class="form-group">
-            <label class="form-label" for="checkout-last-name">Last name</label>
-            <input class="form-input" id="checkout-last-name" type="text" placeholder="Smith">
-          </div>
-        </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label class="form-label" for="checkout-email">Email address</label>
-            <input class="form-input" id="checkout-email" type="email" placeholder="alex@example.com">
-          </div>
-          <div class="form-group">
-            <label class="form-label" for="checkout-phone">Phone number</label>
-            <input class="form-input" id="checkout-phone" type="tel" placeholder="+1 (555) 000-0000">
-          </div>
-        </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label class="form-label" for="checkout-emergency">Emergency contact</label>
-            <input class="form-input" id="checkout-emergency" type="text" placeholder="Name + phone number">
-          </div>
-        </div>
-      </div>
-
-      <div class="checkout-section">
-        <div class="checkout-section-head">
-          <span class="checkout-section-title">Payment</span>
-        </div>
-        <div class="payment-icons">
-          <div class="payment-icon">VISA</div>
-          <div class="payment-icon">MC</div>
-          <div class="payment-icon">AMEX</div>
-          <div class="payment-icon">PAYPAL</div>
-        </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label class="form-label" for="payment-card-number">Card number</label>
-            <input class="form-input" id="payment-card-number" type="text" placeholder="1234 5678 9012 3456">
-          </div>
-        </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label class="form-label" for="payment-expiry">Expiry</label>
-            <input class="form-input" id="payment-expiry" type="text" placeholder="MM / YY">
-          </div>
-          <div class="form-group">
-            <label class="form-label" for="payment-cvv">CVV</label>
-            <input class="form-input" id="payment-cvv" type="text" placeholder="•••">
-          </div>
-          <div class="form-group">
-            <label class="form-label" for="payment-zip">ZIP</label>
-            <input class="form-input" id="payment-zip" type="text" placeholder="98101">
-          </div>
-        </div>
-      </div>
-
-      <div class="checkout-section">
-        <div class="checkout-section-head">
-          <span class="checkout-section-title">Camp rules & cancellation</span>
-        </div>
-        <p class="terms-text">
-          ✅ <strong>Free cancellation</strong> until May 28, 2025 — full refund within 5 business days.<br><br>
-          After May 28: 50% refund if cancelled 48+ hours before arrival. No refund after that.<br><br>
-          🐕 Dogs must be on leash at all times. Max 2 dogs per site.<br>
-          🔥 Campfires permitted in designated rings only. Check fire bans.<br>
-          🤫 Quiet hours: 10PM – 7AM.<br><br>
-          By clicking "Confirm Reservation" you agree to Campin's <a href="https://example.com/terms" target="_blank" rel="noopener noreferrer">Terms of Service</a> and the park's <a href="https://example.com/campground-rules" target="_blank" rel="noopener noreferrer">campground rules</a>.
-        </p>
-      </div>
-    </div>
-
-    <!-- Order Summary -->
-    <div>
-      <div class="checkout-summary">
-        <div class="summary-camp">
-          <div class="summary-camp-img">🌲</div>
-          <div>
-            <div class="summary-camp-name">Lakeshore Haven Camp</div>
-            <div class="summary-camp-loc">Lake Quinault, WA</div>
-            <div class="summary-camp-rating">⭐ 4.92 · 138 reviews</div>
-          </div>
-        </div>
-        <div style="font-size:0.78rem; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color:var(--stone); margin-bottom:0.75rem;">Price breakdown</div>
-        <div class="price-row-item"><span>$48 × 2 nights</span><span>$96</span></div>
-        <div class="price-row-item"><span>State park fee</span><span>$5</span></div>
-        <div class="price-row-item total"><span>Total (USD)</span><span>$101</span></div>
-        <button class="confirm-btn" onclick="goToConfirmation()">✓ Confirm Reservation</button>
-        <p style="font-size:0.75rem; text-align:center; color:var(--text-soft); margin-top:8px">🔒 Secure payment · No charge until confirmed</p>
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- ===== VIEW 6: CONFIRMATION ===== -->
-<div class="view" id="view-confirmation">
-  <div class="confirmation-wrap">
-    <div class="confirm-icon">🎉</div>
-    <h1 class="confirm-title">You're going camping!</h1>
-    <p class="confirm-sub">Your reservation at Lakeshore Haven Camp is confirmed. We've sent a confirmation to your email and saved it to your Campin account.</p>
-
-    <div class="booking-ref">
-      <div class="booking-ref-label">Booking reference</div>
-      <div class="booking-ref-num">CMP-2025-JN07-1489</div>
-      <div class="booking-detail-row"><span class="bdl">Campsite</span><span class="bdr">Lakeshore Haven — Site #7</span></div>
-      <div class="booking-detail-row"><span class="bdl">Location</span><span class="bdr">Lake Quinault, WA</span></div>
-      <div class="booking-detail-row"><span class="bdl">Dates</span><span class="bdr">Jun 6 – Jun 8, 2025</span></div>
-      <div class="booking-detail-row"><span class="bdl">Guests</span><span class="bdr">2 guests + 1 dog</span></div>
-      <div class="booking-detail-row"><span class="bdl">Total paid</span><span class="bdr">$101</span></div>
-      <div class="booking-detail-row"><span class="bdl">Cancellation</span><span class="bdr">Free until May 28</span></div>
-    </div>
-
-    <div style="background:var(--stone-light); border-radius:var(--radius-md); padding:1.25rem; margin-bottom:2rem; text-align:left;">
-      <div style="font-size:0.78rem; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color:var(--stone); margin-bottom:0.75rem;">⚡ Availability Alert Active</div>
-      <p style="font-size:0.875rem; color:var(--text-mid); line-height:1.6;">We're watching for openings at 3 of your wishlisted campsites for this summer. We'll notify you the moment a spot opens up.</p>
-    </div>
-
-    <div class="confirm-actions">
-      <button class="action-btn" onclick="goHome()">🏕 Find more campsites</button>
-      <button class="action-btn" onclick="viewItinerary()">📋 View itinerary</button>
-      <button class="action-btn primary" onclick="downloadCampinApp()">📲 Download app</button>
     </div>
   </div>
 </div>
