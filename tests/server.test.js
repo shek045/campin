@@ -98,3 +98,16 @@ test('provider failures are not cached and timeouts abort body reads', async () 
   }) });
   await assert.rejects(slow('slow'), /aborted/);
 });
+
+test('provider requests only reach allowlisted HTTPS hosts', async () => {
+  const seen = [];
+  const provider = createProviderFetcher({
+    allowedHosts: ['ridb.recreation.gov'],
+    fetchImpl: async url => { seen.push(String(url)); return { ok: true, status: 200, json: async () => ({}) }; }
+  });
+  await provider(new URL('https://ridb.recreation.gov/api/v1/facilities?query=x'));
+  await assert.rejects(provider('https://evil.example.com/steal'), /not allowed/);
+  await assert.rejects(provider('http://ridb.recreation.gov/api/v1/facilities'), /not allowed/);
+  await assert.rejects(provider('not a url'), /Invalid provider URL/);
+  assert.deepEqual(seen, ['https://ridb.recreation.gov/api/v1/facilities?query=x']);
+});

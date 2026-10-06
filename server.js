@@ -3,7 +3,15 @@ const fs = require('fs');
 const path = require('path');
 const { publicFile, readJsonBody, createRateLimiter, validateApiParams } = require('./lib/http');
 const { createProviderFetcher } = require('./lib/providers');
-const fetchProvider = createProviderFetcher();
+const fetchProvider = createProviderFetcher({
+  allowedHosts: [
+    'ridb.recreation.gov',
+    'www.recreation.gov',
+    'developer.nps.gov',
+    'commons.wikimedia.org',
+    'maps.googleapis.com'
+  ]
+});
 const allowApiRequest = createRateLimiter();
 const allowAiRequest = createRateLimiter({ limit: 12 });
 
@@ -374,10 +382,16 @@ async function proxyRidbCampsites(reqUrl, res, facilityId) {
     return;
   }
 
+  const id = String(facilityId);
+  if (!/^\d{1,12}$/.test(id)) {
+    sendJson(res, 400, { error: 'Invalid facility ID.' });
+    return;
+  }
+
   const limit = reqUrl.searchParams.get('limit') || '200';
   const offset = reqUrl.searchParams.get('offset') || '0';
 
-  const upstream = new URL(`https://ridb.recreation.gov/api/v1/facilities/${encodeURIComponent(String(facilityId))}/campsites`);
+  const upstream = new URL(`https://ridb.recreation.gov/api/v1/facilities/${id}/campsites`);
   upstream.searchParams.set('limit', limit);
   upstream.searchParams.set('offset', offset);
 
@@ -418,9 +432,14 @@ async function proxyNpsCampgrounds(reqUrl, res) {
 }
 
 async function proxyRecreationAvailability(reqUrl, res, campgroundId) {
+  const id = String(campgroundId);
+  if (!/^\d{1,12}$/.test(id)) {
+    sendJson(res, 400, { error: 'Invalid campground ID.' });
+    return;
+  }
   const startDate = reqUrl.searchParams.get('start_date') || new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1)).toISOString();
 
-  const upstream = new URL(`https://www.recreation.gov/api/camps/availability/campground/${campgroundId}/month`);
+  const upstream = new URL(`https://www.recreation.gov/api/camps/availability/campground/${id}/month`);
   upstream.searchParams.set('start_date', startDate);
 
   try {
